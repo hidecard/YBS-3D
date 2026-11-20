@@ -1,0 +1,2458 @@
+<!DOCTYPE html>
+<html lang="my">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>YBS Ai — 3D Map &amp; Live GPS Route Finder</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    window.ensureThreeLoaded = function () {
+      if (window.THREE) return Promise.resolve();
+      const fallbacks = [
+        'https://unpkg.com/three@0.128.0/build/three.min.js',
+        'https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js'
+      ];
+      return new Promise((resolve, reject) => {
+        let idx = 0;
+        function tryNext() {
+          if (window.THREE) return resolve();
+          if (idx >= fallbacks.length) return reject(new Error('Three.js failed to load'));
+          const s = document.createElement('script');
+          s.src = fallbacks[idx++];
+          s.onload = () => (window.THREE ? resolve() : tryNext());
+          s.onerror = tryNext;
+          document.head.appendChild(s);
+        }
+        tryNext();
+      });
+    };
+  </script>
+  <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+Myanmar:wght@400;600;700&display=swap" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #dbeafe;
+      color: #f8fafc;
+      font-family: 'Inter', 'Noto Sans Myanmar', system-ui, -apple-system, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #canvas-container {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 0;
+      touch-action: none;
+    }
+    .glass-panel {
+      background: rgba(15, 23, 42, 0.90);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(251, 191, 36, 0.34);
+      box-shadow: 0 20px 50px rgba(15, 23, 42, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    }
+    .glass-pill {
+      background: rgba(15, 23, 42, 0.90);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(148, 163, 184, 0.30);
+      box-shadow: 0 6px 20px rgba(15, 23, 42, 0.22);
+    }
+    .custom-scroll::-webkit-scrollbar { width: 5px; height: 5px; }
+    .custom-scroll::-webkit-scrollbar-track { background: transparent; }
+    .custom-scroll::-webkit-scrollbar-thumb { background: rgba(251, 191, 36, 0.42); border-radius: 999px; }
+    .custom-scroll::-webkit-scrollbar-thumb:hover { background: rgba(251, 191, 36, 0.68); }
+    @keyframes pulseGlow {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.45); }
+      50% { box-shadow: 0 0 0 8px rgba(251, 191, 36, 0); }
+    }
+    .pulse-amber { animation: pulseGlow 2.2s infinite; }
+    .bus-badge {
+      background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+      color: #090d16;
+      font-weight: 800;
+      text-shadow: 0 1px 0 rgba(255,255,255,0.25);
+    }
+  </style>
+</head>
+<body class="select-none">
+  <!-- 3D Three.js Daytime World -->
+  <div id="canvas-container"></div>
+
+  <!-- 3D Stop Hover Tooltip -->
+  <div id="stop-tooltip" class="hidden fixed z-30 pointer-events-none px-3 py-2 rounded-xl glass-panel text-xs max-w-[260px] transition-opacity duration-100">
+    <div id="tooltip-title" class="font-bold text-amber-300 truncate"></div>
+    <div id="tooltip-sub" class="text-slate-300 text-[11px] truncate"></div>
+    <div id="tooltip-road" class="text-slate-400 text-[10px] mt-0.5 truncate"></div>
+    <div id="tooltip-lines" class="flex flex-wrap gap-1 mt-1.5"></div>
+  </div>
+
+  <!-- Top HUD Bar -->
+  <header class="fixed top-3 left-3 right-3 z-20 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
+    <!-- Brand + Sync Status -->
+    <div id="sync-pill" class="flex items-center gap-2 pointer-events-auto">
+      <button id="toggle-panel-btn" type="button" class="glass-panel rounded-2xl px-3 py-2 flex items-center gap-2.5 hover:border-amber-400/50 transition cursor-pointer" title="Toggle Side Panel">
+        <div class="w-8 h-8 rounded-xl bus-badge flex items-center justify-center shadow-md">
+          <i data-lucide="bus" class="w-4 h-4"></i>
+        </div>
+        <div class="text-left">
+          <div class="flex items-center gap-1.5">
+            <span class="font-extrabold text-sm tracking-tight text-white">YBS <span class="text-amber-400">Ai</span></span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-400/20 text-amber-300 border border-amber-400/40 font-semibold">3D LIVE GPS</span>
+          </div>
+          <div id="sync-status-text" class="text-[10px] text-slate-300">Initializing Yangon Map...</div>
+        </div>
+      </button>
+
+      <!-- Sync Progress & Data Manager Trigger -->
+      <button id="open-data-modal-btn" type="button" class="hidden md:flex items-center gap-2 glass-pill hover:border-amber-400/40 rounded-full px-3 py-1.5 text-xs transition cursor-pointer" title="Sync GitHub or Import Local YBS-Bus-Data JSON">
+        <span id="sync-dot" class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+        <span id="sync-count" class="text-slate-100 font-medium tabular-nums">0 / 147 Routes</span>
+        <span id="stops-count-pill" class="text-[10px] text-sky-300 font-semibold tabular-nums">0 stops</span>
+        <div class="w-12 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+          <div id="sync-bar" class="h-full bg-gradient-to-r from-amber-400 to-emerald-400 transition-all duration-300" style="width: 0%"></div>
+        </div>
+        <i data-lucide="database" class="w-3.5 h-3.5 text-amber-300"></i>
+      </button>
+    </div>
+
+    <!-- Live GPS & Quick Controls -->
+    <div class="flex items-center gap-2 pointer-events-auto">
+      <button id="gps-locate-btn" type="button" class="glass-pill hover:border-sky-400/60 rounded-full px-3.5 py-2 flex items-center gap-1.5 text-xs font-bold text-sky-300 transition cursor-pointer shadow-lg" title="Locate My Live GPS Position">
+        <span id="gps-pulse-dot" class="w-2.5 h-2.5 rounded-full bg-sky-400"></span>
+        <i data-lucide="locate-fixed" class="w-3.5 h-3.5"></i>
+        <span id="gps-btn-label">My GPS</span>
+      </button>
+
+      <button id="mobile-data-btn" type="button" class="md:hidden glass-pill w-9 h-9 rounded-full flex items-center justify-center text-amber-300 hover:border-amber-400/40 transition cursor-pointer" title="Sync / Import Data">
+        <i data-lucide="database" class="w-4 h-4"></i>
+      </button>
+
+      <button id="sound-toggle-btn" type="button" class="glass-pill w-9 h-9 rounded-full flex items-center justify-center text-slate-200 hover:text-amber-300 hover:border-amber-400/40 transition cursor-pointer" title="Toggle Sound Effects">
+        <i id="sound-icon" data-lucide="volume-2" class="w-4 h-4"></i>
+      </button>
+
+      <button id="help-btn" type="button" class="glass-pill w-9 h-9 rounded-full flex items-center justify-center text-slate-200 hover:text-amber-300 hover:border-amber-400/40 transition cursor-pointer" title="Map Controls &amp; Guide">
+        <i data-lucide="help-circle" class="w-4 h-4"></i>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Left Transit Panel -->
+  <aside id="side-panel" class="fixed top-16 left-3 bottom-16 sm:bottom-3 w-[calc(100vw-1.5rem)] sm:w-[385px] z-20 glass-panel rounded-2xl flex flex-col overflow-hidden transition-transform duration-300">
+    <!-- Tabs -->
+    <div class="grid grid-cols-3 p-1.5 gap-1 bg-slate-950/60 border-b border-slate-800/80 shrink-0">
+      <button data-tab="finder" type="button" class="tab-btn active flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-semibold bg-amber-400 text-slate-950 shadow transition cursor-pointer">
+        <i data-lucide="navigation" class="w-3.5 h-3.5"></i>
+        <span>Route AI</span>
+      </button>
+      <button data-tab="nearby" type="button" class="tab-btn flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-semibold text-slate-300 hover:text-white hover:bg-slate-800/60 transition cursor-pointer">
+        <i data-lucide="radar" class="w-3.5 h-3.5"></i>
+        <span>Nearby</span>
+      </button>
+      <button data-tab="lines" type="button" class="tab-btn flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-semibold text-slate-300 hover:text-white hover:bg-slate-800/60 transition cursor-pointer">
+        <i data-lucide="list" class="w-3.5 h-3.5"></i>
+        <span>147 Lines</span>
+      </button>
+    </div>
+
+    <!-- Tab 1: AI Route & Transfer Finder -->
+    <div id="tab-finder" class="tab-content flex-1 flex flex-col overflow-hidden">
+      <div class="p-3.5 space-y-2.5 border-b border-slate-800/70 shrink-0">
+        <!-- Smart AI Query Input -->
+        <div>
+          <label class="block text-[11px] font-semibold text-amber-300/90 mb-1 flex items-center justify-between">
+            <span class="flex items-center gap-1"><i data-lucide="bot" class="w-3.5 h-3.5"></i> YBS Ai Smart Search</span>
+            <button id="use-gps-origin-btn" type="button" class="text-[10px] text-sky-300 hover:text-sky-200 underline flex items-center gap-1 cursor-pointer">
+              <i data-lucide="navigation-2" class="w-3 h-3"></i> Use Nearest GPS Stop
+            </button>
+          </label>
+          <div class="flex gap-1.5">
+            <input id="ai-query-input" type="text" placeholder="e.g. Sule to Hledan / ဆူးလေ မှ လှည်းတန်း" class="flex-1 bg-slate-900/90 border border-slate-700/80 focus:border-amber-400 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 outline-none transition" />
+            <button id="ai-query-btn" type="button" class="px-3 py-2 rounded-xl bus-badge text-xs hover:brightness-110 transition cursor-pointer shrink-0">Ask Ai</button>
+          </div>
+        </div>
+
+        <!-- Origin / Destination Pickers -->
+        <div class="relative space-y-2">
+          <div class="flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-emerald-400 ring-4 ring-emerald-400/20 shrink-0"></span>
+            <div class="relative flex-1">
+              <input id="origin-input" type="text" autocomplete="off" placeholder="Origin Stop (စတင်မည့်မှတ်တိုင်)..." class="w-full bg-slate-900/80 border border-slate-700/80 focus:border-emerald-400 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 outline-none" />
+              <div id="origin-dropdown" class="hidden absolute left-0 right-0 top-full mt-1 max-h-44 overflow-y-auto custom-scroll glass-panel rounded-xl z-30 p-1"></div>
+            </div>
+          </div>
+
+          <button id="swap-stops-btn" type="button" class="absolute right-2 top-1/2 -translate-y-1/2 z-10 w-7 h-7 rounded-full bg-slate-800 border border-slate-600/80 hover:border-amber-400 flex items-center justify-center text-slate-300 hover:text-amber-300 transition cursor-pointer" title="Swap Origin &amp; Destination">
+            <i data-lucide="arrow-up-down" class="w-3.5 h-3.5"></i>
+          </button>
+
+          <div class="flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-rose-400 ring-4 ring-rose-400/20 shrink-0"></span>
+            <div class="relative flex-1">
+              <input id="dest-input" type="text" autocomplete="off" placeholder="Destination Stop (သွားလိုသည့်မှတ်တိုင်)..." class="w-full bg-slate-900/80 border border-slate-700/80 focus:border-rose-400 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 outline-none" />
+              <div id="dest-dropdown" class="hidden absolute left-0 right-0 top-full mt-1 max-h-44 overflow-y-auto custom-scroll glass-panel rounded-xl z-30 p-1"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Find Route Action -->
+        <div class="flex gap-2">
+          <button id="find-route-btn" type="button" class="flex-1 py-2.5 rounded-xl bus-badge text-xs font-bold flex items-center justify-center gap-1.5 hover:brightness-110 transition cursor-pointer pulse-amber">
+            <i data-lucide="route" class="w-4 h-4"></i>
+            <span>Find Direct &amp; Transfer Routes</span>
+          </button>
+          <button id="clear-route-btn" type="button" class="px-3 py-2.5 rounded-xl bg-slate-800/90 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition cursor-pointer" title="Clear Route">
+            <i data-lucide="x" class="w-4 h-4"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- Results List -->
+      <div id="route-results" class="flex-1 overflow-y-auto custom-scroll p-3.5 space-y-2.5">
+        <div class="rounded-xl bg-slate-900/60 border border-slate-800 p-3 text-xs text-slate-300 space-y-2">
+          <div class="font-semibold text-amber-300 flex items-center gap-1.5">
+            <i data-lucide="map-pin" class="w-3.5 h-3.5"></i>
+            <span>Live GPS &amp; Multi-Transfer YBS Guide</span>
+          </div>
+          <p class="text-[11px] text-slate-400 leading-relaxed">
+            အပေါ်ညာဘက်ရှိ <strong class="text-sky-300">My GPS</strong> ခလုတ်ကို နှိပ်၍ မိမိရောက်နေသည့် နေရာနှင့် အနီးဆုံး YBS မှတ်တိုင်များကို ကြည့်ရှုပြီး တိုက်ရိုက် (Direct) သို့မဟုတ် ကားပြောင်းစီးရမည့် (Transfer) လမ်းကြောင်းများကို ရှာဖွေနိုင်ပါသည်။
+          </p>
+          <div id="quick-demos" class="flex flex-wrap gap-1.5 pt-1"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 2: Live GPS & Nearest Stops -->
+    <div id="tab-nearby" class="tab-content hidden flex-1 flex flex-col overflow-hidden">
+      <div class="p-3.5 border-b border-slate-800/70 space-y-2.5 shrink-0">
+        <div class="rounded-xl bg-sky-500/10 border border-sky-400/30 p-3 space-y-2">
+          <div class="flex items-center justify-between">
+            <div class="text-xs font-bold text-sky-300 flex items-center gap-1.5">
+              <i data-lucide="satellite" class="w-4 h-4"></i>
+              <span>Live GPS Location</span>
+            </div>
+            <span id="gps-status-badge" class="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-semibold">Not Active</span>
+          </div>
+          <div id="gps-coords-text" class="text-[11px] text-slate-300 leading-relaxed">
+            GPS မဖွင့်ရသေးပါ။ အောက်ပါခလုတ်ကို နှိပ်၍ မိမိရောက်နေသော နေရာကို ရှာဖွေပါ။
+          </div>
+          <div class="flex gap-2">
+            <button id="panel-gps-btn" type="button" class="flex-1 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer">
+              <i data-lucide="locate-fixed" class="w-3.5 h-3.5"></i>
+              <span>Find My Live Location</span>
+            </button>
+            <button id="demo-gps-btn" type="button" class="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-slate-200 transition cursor-pointer" title="Simulate Location at Hledan">
+              Demo GPS
+            </button>
+          </div>
+        </div>
+      </div>
+      <div id="nearby-stops-list" class="flex-1 overflow-y-auto custom-scroll p-3.5 space-y-2">
+        <div class="text-xs text-slate-400 text-center py-6">
+          Live GPS ဖွင့်လိုက်ပါက သင့်အနီးဆုံး YBS မှတ်တိုင် ၁၅ ခုကို အကွာအဝေးအလိုက် ပြသပေးပါမည်။
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab 3: 147 YBS Lines Explorer -->
+    <div id="tab-lines" class="tab-content hidden flex-1 flex flex-col overflow-hidden">
+      <div class="p-3 border-b border-slate-800/70 space-y-2 shrink-0">
+        <div class="relative">
+          <i data-lucide="search" class="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+          <input id="line-search-input" type="text" placeholder="Search YBS line, name, agency (e.g. 100, GYCT)..." class="w-full bg-slate-900/80 border border-slate-700/80 focus:border-amber-400 rounded-xl pl-8 pr-3 py-2 text-xs text-white placeholder-slate-500 outline-none" />
+        </div>
+        <div class="flex items-center gap-1.5 overflow-x-auto pb-0.5">
+          <button data-filter="all" type="button" class="line-filter-btn active px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-amber-400 text-slate-950 cursor-pointer shrink-0">All</button>
+          <button data-filter="qr" type="button" class="line-filter-btn px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-slate-800 text-slate-300 hover:text-white cursor-pointer shrink-0">QR Pay</button>
+          <button data-filter="loaded" type="button" class="line-filter-btn px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-slate-800 text-slate-300 hover:text-white cursor-pointer shrink-0">Loaded</button>
+        </div>
+      </div>
+      <div id="lines-list" class="flex-1 overflow-y-auto custom-scroll p-3 space-y-2"></div>
+    </div>
+  </aside>
+
+  <!-- Active Bus Simulation & Live Next-Stop HUD (Bottom Center) -->
+  <div id="sim-bar" class="hidden fixed bottom-3 left-1/2 -translate-x-1/2 sm:left-[calc(50%+190px)] z-20 glass-panel rounded-2xl px-3.5 py-2.5 flex flex-col gap-1.5 max-w-[95vw] w-[360px] sm:w-[420px]">
+    <div class="flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2 min-w-0">
+        <button id="sim-play-btn" type="button" class="w-8 h-8 rounded-xl bus-badge flex items-center justify-center cursor-pointer shrink-0" title="Play / Pause 3D Bus">
+          <i id="sim-play-icon" data-lucide="pause" class="w-4 h-4"></i>
+        </button>
+        <div class="min-w-0">
+          <div class="flex items-center gap-1.5">
+            <span id="sim-bus-label" class="text-xs font-extrabold text-amber-300 truncate">YBS 100</span>
+            <span id="sim-remaining-badge" class="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 text-slate-200 font-semibold">0 stops left</span>
+          </div>
+          <div id="sim-current-label" class="text-[10px] text-slate-400 truncate">Current: ...</div>
+        </div>
+      </div>
+      <div class="flex items-center gap-1.5 shrink-0">
+        <button id="sim-speed-btn" type="button" class="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-bold text-amber-300 cursor-pointer">1x</button>
+        <button id="sim-chase-btn" type="button" class="px-2.5 py-1 rounded-lg bg-emerald-500/20 border border-emerald-400/40 text-[11px] font-semibold text-emerald-300 hover:bg-emerald-500/30 cursor-pointer flex items-center gap-1">
+          <i data-lucide="video" class="w-3 h-3"></i>
+          <span>Chase</span>
+        </button>
+      </div>
+    </div>
+    <!-- Prominent Next Upcoming Bus Stop Banner -->
+    <div class="rounded-xl bg-amber-400/15 border border-amber-400/40 px-3 py-1.5 flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2 min-w-0">
+        <span class="w-2 h-2 rounded-full bg-amber-400 animate-ping shrink-0"></span>
+        <div class="min-w-0">
+          <div class="text-[10px] uppercase tracking-wider text-amber-300 font-bold">နောက်ရောက်မည့် မှတ်တိုင် (Next Stop)</div>
+          <div id="sim-next-stop-label" class="text-xs sm:text-sm font-extrabold text-white truncate">...</div>
+        </div>
+      </div>
+      <div id="sim-next-dist" class="text-[11px] font-bold text-sky-300 shrink-0"></div>
+    </div>
+  </div>
+
+  <!-- Zoom In/Out & Camera Controls (Bottom Right) -->
+  <div class="fixed bottom-3 right-3 z-20 flex flex-col gap-1.5">
+    <!-- Zoom In / Zoom Out Controls -->
+    <div class="glass-pill rounded-xl overflow-hidden flex flex-col border border-amber-400/30">
+      <button id="zoom-in-btn" type="button" class="px-3 py-2 text-amber-300 hover:bg-amber-400/20 active:bg-amber-400/30 transition cursor-pointer flex items-center justify-center" title="Zoom In (+)">
+        <i data-lucide="plus" class="w-4 h-4"></i>
+      </button>
+      <div class="h-px bg-slate-700/80"></div>
+      <button id="zoom-out-btn" type="button" class="px-3 py-2 text-amber-300 hover:bg-amber-400/20 active:bg-amber-400/30 transition cursor-pointer flex items-center justify-center" title="Zoom Out (-)">
+        <i data-lucide="minus" class="w-4 h-4"></i>
+      </button>
+    </div>
+
+    <button id="toggle-network-btn" type="button" class="glass-pill px-2.5 py-1.5 rounded-xl text-[11px] font-semibold text-amber-300 border-amber-400/40 transition cursor-pointer flex items-center gap-1.5" title="Toggle All 147 Routes Network">
+      <i data-lucide="git-branch" class="w-3.5 h-3.5"></i>
+      <span class="hidden sm:inline">All Lines</span>
+    </button>
+    <button id="toggle-labels-btn" type="button" class="glass-pill px-2.5 py-1.5 rounded-xl text-[11px] font-semibold text-amber-300 border-amber-400/40 transition cursor-pointer flex items-center gap-1.5" title="Toggle District Labels">
+      <i data-lucide="tag" class="w-3.5 h-3.5"></i>
+      <span class="hidden sm:inline">Labels</span>
+    </button>
+    <button data-cam="iso" type="button" class="cam-btn glass-pill px-2.5 py-1.5 rounded-xl text-[11px] font-semibold text-slate-200 hover:text-amber-300 hover:border-amber-400/40 transition cursor-pointer flex items-center gap-1.5" title="Isometric 3D View">
+      <i data-lucide="box" class="w-3.5 h-3.5"></i>
+      <span class="hidden sm:inline">3D Iso</span>
+    </button>
+    <button data-cam="top" type="button" class="cam-btn glass-pill px-2.5 py-1.5 rounded-xl text-[11px] font-semibold text-slate-200 hover:text-amber-300 hover:border-amber-400/40 transition cursor-pointer flex items-center gap-1.5" title="Top-Down Map View">
+      <i data-lucide="map" class="w-3.5 h-3.5"></i>
+      <span class="hidden sm:inline">Top</span>
+    </button>
+    <button data-cam="reset" type="button" class="cam-btn glass-pill px-2.5 py-1.5 rounded-xl text-[11px] font-semibold text-slate-200 hover:text-amber-300 hover:border-amber-400/40 transition cursor-pointer flex items-center gap-1.5" title="Reset Camera">
+      <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>
+      <span class="hidden sm:inline">Reset</span>
+    </button>
+  </div>
+
+  <!-- Data Sync & Local Import Modal -->
+  <div id="data-modal" class="hidden fixed inset-0 z-40 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="glass-panel rounded-2xl max-w-md w-full p-5 space-y-3.5">
+      <div class="flex items-center justify-between">
+        <h2 class="text-base font-extrabold text-amber-300 flex items-center gap-2">
+          <i data-lucide="database" class="w-5 h-5"></i>
+          <span>YBS-Bus-Data Manager</span>
+        </h2>
+        <button id="close-data-modal" type="button" class="w-7 h-7 rounded-lg bg-slate-800 hover:bg-slate-700 flex items-center justify-center text-slate-300 cursor-pointer">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+      <div id="data-modal-stats" class="rounded-xl bg-slate-900/80 border border-slate-800 p-3 text-xs text-slate-300 space-y-1"></div>
+      <div class="space-y-2">
+        <button id="retry-github-btn" type="button" class="w-full py-2.5 rounded-xl bus-badge text-xs font-bold flex items-center justify-center gap-2 hover:brightness-110 transition cursor-pointer">
+          <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+          <span>Sync Live from GitHub / CDN (147 Routes)</span>
+        </button>
+        <label class="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600/80 text-xs font-semibold text-slate-100 flex items-center justify-center gap-2 cursor-pointer transition">
+          <i data-lucide="folder-open" class="w-4 h-4 text-amber-300"></i>
+          <span>Import Local YBS-Bus-Data JSON Files</span>
+          <input id="local-json-input" type="file" multiple accept=".json" class="hidden" />
+        </label>
+        <p class="text-[11px] text-slate-400 leading-relaxed">
+          GitHub Raw နှင့် jsDelivr CDN နှစ်မျိုးလုံးမှ အလိုအလျောက် ချိတ်ဆက်ပေးပါသည်။ Local ရှိ <code class="text-amber-300">YBS-Bus-Data</code> folder ထဲမှ JSON ဖိုင်များကိုလည်း တိုက်ရိုက် import လုပ်နိုင်ပါသည်။
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stop Action Modal (on 3D Bus Stop Shelter Click) -->
+  <div id="stop-modal" class="hidden fixed inset-0 z-40 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="glass-panel rounded-2xl max-w-sm w-full p-4 space-y-3">
+      <div class="flex items-start justify-between gap-2">
+        <div>
+          <div id="modal-stop-mm" class="text-base font-bold text-amber-300"></div>
+          <div id="modal-stop-en" class="text-xs text-slate-200 font-medium"></div>
+          <div id="modal-stop-road" class="text-[11px] text-slate-400 mt-0.5"></div>
+          <div id="modal-stop-dist" class="text-[11px] text-sky-300 font-semibold mt-0.5"></div>
+        </div>
+        <button id="close-stop-modal" type="button" class="w-7 h-7 rounded-lg bg-slate-800 hover:bg-slate-700 flex items-center justify-center text-slate-300 cursor-pointer">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+      <div>
+        <div class="text-[11px] text-slate-400 mb-1">Passing YBS Lines:</div>
+        <div id="modal-stop-lines" class="flex flex-wrap gap-1.5"></div>
+      </div>
+      <div class="grid grid-cols-2 gap-2 pt-1">
+        <button id="modal-set-origin" type="button" class="py-2 rounded-xl bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/30 text-xs font-bold cursor-pointer">Set Origin</button>
+        <button id="modal-set-dest" type="button" class="py-2 rounded-xl bg-rose-500/20 border border-rose-400/40 text-rose-300 hover:bg-rose-500/30 text-xs font-bold cursor-pointer">Set Destination</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Help Modal -->
+  <div id="help-modal" class="hidden fixed inset-0 z-40 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="glass-panel rounded-2xl max-w-md w-full p-5 space-y-3">
+      <div class="flex items-center justify-between">
+        <h2 class="text-base font-extrabold text-amber-300 flex items-center gap-2">
+          <i data-lucide="compass" class="w-5 h-5"></i>
+          <span>YBS Ai 3D Map &amp; GPS Guide</span>
+        </h2>
+        <button id="close-help-modal" type="button" class="w-7 h-7 rounded-lg bg-slate-800 hover:bg-slate-700 flex items-center justify-center text-slate-300 cursor-pointer">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+      <ul class="text-xs text-slate-300 space-y-2 leading-relaxed">
+        <li><strong class="text-white">Zoom In / Out:</strong> Use the <kbd class="px-1.5 py-0.5 bg-slate-800 rounded text-amber-300">+</kbd> / <kbd class="px-1.5 py-0.5 bg-slate-800 rounded text-amber-300">-</kbd> buttons, mouse scroll wheel, or two-finger pinch on touchscreens.</li>
+        <li><strong class="text-white">Live GPS &amp; Nearest Stops:</strong> Tap <span class="text-sky-300 font-semibold">My GPS</span> to show your live location pin on the 3D Yangon map and list the closest YBS bus stops.</li>
+        <li><strong class="text-white">Transfer Routing:</strong> Automatically finds Direct (0-transfer) and Multi-Transfer (1 or 2 bus changes) journeys with exact transfer stop names.</li>
+        <li><strong class="text-white">3D Bus Stop Shelters:</strong> Tap any YBS bus shelter on the map to inspect lines or set your Origin/Destination.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div id="toast" class="hidden fixed top-16 right-3 z-50 glass-panel rounded-xl px-3.5 py-2.5 text-xs font-semibold text-amber-200 border-amber-400/40 shadow-xl"></div>
+
+  <script>
+  async function startYbsAiApp() {
+    await window.ensureThreeLoaded();
+
+    const CATALOG_URLS = [
+      'https://raw.githubusercontent.com/hidecard/YBS-Bus-Data/main/api/routes.json',
+      'https://cdn.jsdelivr.net/gh/hidecard/YBS-Bus-Data@main/api/routes.json'
+    ];
+    const CDN_BASE = 'https://cdn.jsdelivr.net/gh/hidecard/YBS-Bus-Data@main/';
+    const IDB_NAME = 'ybs_ai_db_v3';
+    const IDB_STORE = 'routes_store';
+
+    const YANGON_CENTER = { lat: 16.845, lng: 96.165 };
+    const SCALE_X = 1150;
+    const SCALE_Z = 1200;
+
+    // Comprehensive Greater Yangon Townships & Landmarks (All Districts)
+    const YANGON_DISTRICTS = [
+      { name: 'Sule / Kyauktada', mm: 'ဆူးလေ / ကျောက်တံတား', lat: 16.7749, lng: 96.1587, landmark: 'stupa' },
+      { name: 'Pabedan / Latha', mm: 'ပန်းဘဲတန်း / လသာ', lat: 16.7765, lng: 96.1505 },
+      { name: 'Lanmadaw / Ahlone', mm: 'လမ်းမတော် / အလုံ', lat: 16.7845, lng: 96.1325 },
+      { name: 'Kyeemyindaing', mm: 'ကြည့်မြင်တိုင်', lat: 16.8015, lng: 96.1225 },
+      { name: 'Sanchaung / Myaynigone', mm: 'စမ်းချောင်း / မြေနီကုန်း', lat: 16.8060, lng: 96.1333 },
+      { name: 'Bahan / Shwedagon', mm: 'ဗဟန်း / ရွှေတိဂုံ', lat: 16.7983, lng: 96.1496, landmark: 'shwedagon' },
+      { name: 'Mingalar Taung Nyunt', mm: 'မင်္ဂလာတောင်ညွန့်', lat: 16.7925, lng: 96.1685 },
+      { name: 'Botataung', mm: 'ဗိုလ်တထောင်', lat: 16.7717, lng: 96.1731 },
+      { name: 'Pazundaung', mm: 'ပုဇွန်တောင်', lat: 16.7706, lng: 96.1947 },
+      { name: 'Tamwe', mm: 'တာမွေ', lat: 16.81018, lng: 96.17646 },
+      { name: 'Yankin', mm: 'ရန်ကင်း', lat: 16.8265, lng: 96.1645 },
+      { name: 'Kamayut / Hledan', mm: 'ကမာရွတ် / လှည်းတန်း', lat: 16.82665, lng: 96.1307 },
+      { name: 'Hlaing', mm: 'လှိုင်', lat: 16.8485, lng: 96.1245 },
+      { name: 'Mayangone / Inya', mm: 'မရမ်းကုန်း / အင်းယား', lat: 16.8545, lng: 96.1422 },
+      { name: 'Thingangyun', mm: 'သင်္ဃန်းကျွန်း', lat: 16.8278, lng: 96.1975 },
+      { name: 'South Okkalapa', mm: 'တောင်ဥက္ကလာပ', lat: 16.8485, lng: 96.1825 },
+      { name: 'North Okkalapa', mm: 'မြောက်ဥက္ကလာပ', lat: 16.9057, lng: 96.1669 },
+      { name: 'Insein', mm: 'အင်းစိန်', lat: 16.8880, lng: 96.1067 },
+      { name: 'Mingaladon / Airport', mm: 'မင်္ဂလာဒုံ / လေဆိပ်', lat: 16.9073, lng: 96.1332 },
+      { name: 'Shwepyithar', mm: 'ရွှေပြည်သာ', lat: 16.9585, lng: 96.0825 },
+      { name: 'Hlaing Tharyar', mm: 'လှိုင်သာယာ', lat: 16.8550, lng: 96.0667 },
+      { name: 'Thaketa', mm: 'သာကေတ', lat: 16.7925, lng: 96.2125 },
+      { name: 'Dawbon', mm: 'ဒေါပုံ', lat: 16.7745, lng: 96.2055 },
+      { name: 'North Dagon', mm: 'ဒဂုံမြို့သစ်(မြောက်ပိုင်း)', lat: 16.8825, lng: 96.2155 },
+      { name: 'South Dagon', mm: 'ဒဂုံမြို့သစ်(တောင်ပိုင်း)', lat: 16.8355, lng: 96.2455 },
+      { name: 'East Dagon', mm: 'ဒဂုံမြို့သစ်(အရှေ့ပိုင်း)', lat: 16.9155, lng: 96.2485 },
+      { name: 'Dagon Seikkan', mm: 'ဒဂုံဆိပ်ကမ်း', lat: 16.8747, lng: 96.2800 },
+      { name: 'Dala', mm: 'ဒလ', lat: 16.7485, lng: 96.1515 },
+      { name: 'Thanlyin', mm: 'သန်လျင်', lat: 16.7525, lng: 96.2485 }
+    ];
+
+    const FALLBACK_CATALOG = [
+      { bus_line: '100', route_name: '100', line_name: 'ကျီစု - မြတ်နန္ဒာ - ဆူးလေ (YBS 100)', agency: 'GYCT', route_type: 'route', total_stops: 104, qr_payment: '✅ Supported', data_file: 'ybs_100_data.json', data_url: 'https://raw.githubusercontent.com/hidecard/YBS-Bus-Data/main/ybs_100_data.json' },
+      { bus_line: '21', route_name: '21', line_name: 'အင်းစိန် - လှည်းတန်း - ဆူးလေ (Starter)', agency: 'YUPT', route_type: 'route', total_stops: 5, qr_payment: '✅ Supported', data_file: 'ybs_21_data.json', data_url: 'https://raw.githubusercontent.com/hidecard/YBS-Bus-Data/main/ybs_21_data.json' },
+      { bus_line: '37', route_name: '37', line_name: 'မင်္ဂလာဒုံ - မြောက်ဥက္ကလာ - ဆူးလေ (Starter)', agency: 'YUPT', route_type: 'route', total_stops: 5, qr_payment: '✅ Supported', data_file: 'ybs_37_data.json', data_url: 'https://raw.githubusercontent.com/hidecard/YBS-Bus-Data/main/ybs_37_data.json' },
+      { bus_line: '12', route_name: '12', line_name: 'သင်္ဃန်းကျွန်း - တာမွေ - ဗိုလ်တထောင် (Starter)', agency: 'Omni Focus', route_type: 'route', total_stops: 4, qr_payment: '✅ Supported', data_file: 'ybs_12_data.json', data_url: 'https://raw.githubusercontent.com/hidecard/YBS-Bus-Data/main/ybs_12_data.json' },
+      { bus_line: '43', route_name: '43', line_name: 'လှိုင်သာယာ - လှည်းတန်း - မြေနီကုန်း (Starter)', agency: 'Bandoola', route_type: 'route', total_stops: 4, qr_payment: '❌ Not Supported', data_file: 'ybs_43_data.json', data_url: 'https://raw.githubusercontent.com/hidecard/YBS-Bus-Data/main/ybs_43_data.json' }
+    ];
+
+    const FALLBACK_ROUTES = {
+      '100': {
+        bus_line: '100',
+        route_info: { 'Route Name': '100', 'Line Name': 'ကျီစု - မြတ်နန္ဒာ (YBS 100)', 'Agency': 'GYCT', 'QR Payment': '✅ Supported' },
+        stops: [
+          { index: '1', stop_name_en: 'Kyi Su', stop_name_mm: 'ကျီစု', road: 'Yoma Yeiktha Road, Dagon Seikkan', latitude: 16.874687, longitude: 96.280012 },
+          { index: '2', stop_name_en: 'Myat Nandar', stop_name_mm: 'မြတ်နန္ဒာ', road: 'Yoma Yeiktha Road, Dagon Seikkan', latitude: 16.876774, longitude: 96.275907 },
+          { index: '3', stop_name_en: 'Thingangyun', stop_name_mm: 'သင်္ဃန်းကျွန်း', road: 'Lay Daung Kan Road', latitude: 16.8278, longitude: 96.1975 },
+          { index: '4', stop_name_en: 'Pazundaung', stop_name_mm: 'ပုဇွန်တောင်', road: 'Pazundaung Creek Corridor', latitude: 16.7706, longitude: 96.1947 },
+          { index: '5', stop_name_en: 'Botataung', stop_name_mm: 'ဗိုလ်တထောင်', road: 'Strand Road, Botataung', latitude: 16.7717, longitude: 96.1731 },
+          { index: '6', stop_name_en: 'Sule', stop_name_mm: 'ဆူးလေ', road: 'Sule Pagoda Road', latitude: 16.7749, longitude: 96.1587 }
+        ]
+      },
+      '21': {
+        bus_line: '21',
+        route_info: { 'Route Name': '21', 'Line Name': 'အင်းစိန် - လှည်းတန်း - ဆူးလေ', 'Agency': 'YUPT', 'QR Payment': '✅ Supported' },
+        stops: [
+          { index: '1', stop_name_en: 'Insein', stop_name_mm: 'အင်းစိန်', road: 'Insein Road', latitude: 16.8880, longitude: 96.1067 },
+          { index: '2', stop_name_en: 'Hledan', stop_name_mm: 'လှည်းတန်း', road: 'Pyay Road & Hledan Road', latitude: 16.82665, longitude: 96.1307 },
+          { index: '3', stop_name_en: 'Myaynigone', stop_name_mm: 'မြေနီကုန်း', road: 'Pyay Road, Sanchaung', latitude: 16.8060, longitude: 96.1333 },
+          { index: '4', stop_name_en: 'Shwedagon', stop_name_mm: 'ရွှေတိဂုံ', road: 'Shwedagon Pagoda Road', latitude: 16.7983, longitude: 96.1496 },
+          { index: '5', stop_name_en: 'Sule', stop_name_mm: 'ဆူးလေ', road: 'Sule Pagoda Road', latitude: 16.7749, longitude: 96.1587 }
+        ]
+      },
+      '37': {
+        bus_line: '37',
+        route_info: { 'Route Name': '37', 'Line Name': 'မင်္ဂလာဒုံ - မြောက်ဥက္ကလာ - ဆူးလေ', 'Agency': 'YUPT', 'QR Payment': '✅ Supported' },
+        stops: [
+          { index: '1', stop_name_en: 'Mingaladon', stop_name_mm: 'မင်္ဂလာဒုံ', road: 'Pyay Road, Mingaladon', latitude: 16.9073, longitude: 96.1332 },
+          { index: '2', stop_name_en: 'North Okkalapa', stop_name_mm: 'မြောက်ဥက္ကလာပ', road: 'Thudhamma Road', latitude: 16.9057, longitude: 96.1669 },
+          { index: '3', stop_name_en: 'Inya Lake', stop_name_mm: 'အင်းယားကန်', road: 'Kaba Aye Pagoda Road', latitude: 16.8354, longitude: 96.1422 },
+          { index: '4', stop_name_en: 'Kandawgyi', stop_name_mm: 'ကန်တော်ကြီး', road: 'Kan Yeik Tha Road', latitude: 16.7955, longitude: 96.1666 },
+          { index: '5', stop_name_en: 'Sule', stop_name_mm: 'ဆူးလေ', road: 'Sule Pagoda Road', latitude: 16.7749, longitude: 96.1587 }
+        ]
+      },
+      '12': {
+        bus_line: '12',
+        route_info: { 'Route Name': '12', 'Line Name': 'သင်္ဃန်းကျွန်း - တာမွေ - ဗိုလ်တထောင်', 'Agency': 'Omni Focus', 'QR Payment': '✅ Supported' },
+        stops: [
+          { index: '1', stop_name_en: 'Thingangyun', stop_name_mm: 'သင်္ဃန်းကျွန်း', road: 'Lay Daung Kan Road', latitude: 16.8278, longitude: 96.1975 },
+          { index: '2', stop_name_en: 'Tamwe', stop_name_mm: 'တာမွေ', road: 'Banyardala Road', latitude: 16.81018, longitude: 96.17646 },
+          { index: '3', stop_name_en: 'Kandawgyi', stop_name_mm: 'ကန်တော်ကြီး', road: 'Kan Yeik Tha Road', latitude: 16.7955, longitude: 96.1666 },
+          { index: '4', stop_name_en: 'Botataung', stop_name_mm: 'ဗိုလ်တထောင်', road: 'Strand Road, Botataung', latitude: 16.7717, longitude: 96.1731 }
+        ]
+      },
+      '43': {
+        bus_line: '43',
+        route_info: { 'Route Name': '43', 'Line Name': 'လှိုင်သာယာ - လှည်းတန်း - မြေနီကုန်း', 'Agency': 'Bandoola', 'QR Payment': '❌ Not Supported' },
+        stops: [
+          { index: '1', stop_name_en: 'Hlaing Tharyar', stop_name_mm: 'လှိုင်သာယာ', road: 'Anawrahta Road, Hlaing Tharyar', latitude: 16.8500, longitude: 96.0667 },
+          { index: '2', stop_name_en: 'Insein', stop_name_mm: 'အင်းစိန်', road: 'Insein Road', latitude: 16.8880, longitude: 96.1067 },
+          { index: '3', stop_name_en: 'Hledan', stop_name_mm: 'လှည်းတန်း', road: 'Pyay Road & Hledan Road', latitude: 16.82665, longitude: 96.1307 },
+          { index: '4', stop_name_en: 'Myaynigone', stop_name_mm: 'မြေနီကုန်း', road: 'Pyay Road, Sanchaung', latitude: 16.8060, longitude: 96.1333 }
+        ]
+      }
+    };
+
+    // =========================================================================
+    // 2. APPLICATION STATE & INDEXEDDB CACHE
+    // =========================================================================
+    const state = {
+      catalog: [],
+      loadedRoutes: {},
+      stopsMap: new Map(),
+      originKey: null,
+      destKey: null,
+      foundJourneys: [],
+      activeJourney: null,
+      activeTab: 'finder',
+      lineFilter: 'all',
+      soundEnabled: true,
+      labelsVisible: true,
+      networkVisible: true,
+      panelOpen: true,
+      syncMode: 'Initializing',
+      gps: {
+        active: false,
+        lat: null,
+        lng: null,
+        accuracy: null,
+        nearestStops: [],
+        watchId: null
+      },
+      sim: {
+        playing: false,
+        speed: 1,
+        chaseCam: false,
+        progress: 0,
+        curves: [],
+        legMeta: [],
+        totalLength: 0
+      }
+    };
+
+    function openDB() {
+      return new Promise((resolve, reject) => {
+        try {
+          if (!window.indexedDB) return reject(new Error('No IDB'));
+          const req = indexedDB.open(IDB_NAME, 1);
+          req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+          };
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        } catch (e) { reject(e); }
+      });
+    }
+
+    async function idbGet(key) {
+      try {
+        const db = await openDB();
+        return await new Promise((resolve) => {
+          const tx = db.transaction(IDB_STORE, 'readonly');
+          const req = tx.objectStore(IDB_STORE).get(key);
+          req.onsuccess = () => resolve(req.result || null);
+          req.onerror = () => resolve(null);
+        });
+      } catch (e) { return null; }
+    }
+
+    async function idbSet(key, val) {
+      try {
+        const db = await openDB();
+        await new Promise((resolve) => {
+          const tx = db.transaction(IDB_STORE, 'readwrite');
+          tx.objectStore(IDB_STORE).put(val, key);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+        });
+      } catch (e) {}
+    }
+
+    // =========================================================================
+    // 3. AUDIO SYNTHESIZER (Web Audio API)
+    // =========================================================================
+    let audioCtx = null;
+    function ensureAudio() {
+      if (!state.soundEnabled) return null;
+      try {
+        if (!audioCtx) {
+          const Ctx = window.AudioContext || window.webkitAudioContext;
+          if (Ctx) audioCtx = new Ctx();
+        }
+        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+        return audioCtx;
+      } catch (e) { return null; }
+    }
+
+    function playTone(freq, duration, type, gainVal) {
+      const ctx = ensureAudio();
+      if (!ctx) return;
+      try {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = type || 'sine';
+        osc.frequency.setValueAtTime(freq, ctx.currentTime);
+        gain.gain.setValueAtTime(gainVal || 0.08, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + duration);
+      } catch (e) {}
+    }
+
+    function sfxClick() { playTone(520, 0.06, 'triangle', 0.05); }
+    function sfxFound() {
+      playTone(523.25, 0.12, 'sine', 0.08);
+      setTimeout(() => playTone(659.25, 0.12, 'sine', 0.08), 80);
+      setTimeout(() => playTone(783.99, 0.2, 'sine', 0.09), 160);
+    }
+    function sfxDepart() {
+      playTone(330, 0.14, 'triangle', 0.08);
+      setTimeout(() => playTone(440, 0.22, 'triangle', 0.08), 110);
+    }
+    function sfxArrive() {
+      playTone(587.33, 0.12, 'sine', 0.08);
+      setTimeout(() => playTone(880, 0.28, 'sine', 0.09), 110);
+    }
+
+    // =========================================================================
+    // 4. GEO, HAVERSINE DISTANCE & GRAPH UTILITIES
+    // =========================================================================
+    function project(lat, lng) {
+      return {
+        x: (lng - YANGON_CENTER.lng) * SCALE_X,
+        z: -(lat - YANGON_CENTER.lat) * SCALE_Z
+      };
+    }
+
+    function haversineMeters(lat1, lng1, lat2, lng2) {
+      const R = 6371000;
+      const toRad = d => (d * Math.PI) / 180;
+      const dLat = toRad(lat2 - lat1);
+      const dLng = toRad(lng2 - lng1);
+      const a = Math.sin(dLat / 2) ** 2 +
+                Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+      return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    function formatDistance(meters) {
+      if (!Number.isFinite(meters)) return '';
+      if (meters < 1000) return `${Math.round(meters)} m`;
+      return `${(meters / 1000).toFixed(2)} km`;
+    }
+
+    function makeStopKey(stop) {
+      const name = (stop.stop_name_en || stop.stop_name_mm || 'stop').trim().toLowerCase();
+      const lat = Number(stop.latitude || 0).toFixed(4);
+      const lng = Number(stop.longitude || 0).toFixed(4);
+      return `${name}|${lat}|${lng}`;
+    }
+
+    function ingestRouteData(busLine, routeData) {
+      if (!routeData || !Array.isArray(routeData.stops) || routeData.stops.length === 0) return;
+      state.loadedRoutes[busLine] = routeData;
+      for (const s of routeData.stops) {
+        const lat = Number(s.latitude);
+        const lng = Number(s.longitude);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat === 0 || lng === 0) continue;
+        const key = makeStopKey(s);
+        let entry = state.stopsMap.get(key);
+        if (!entry) {
+          const p = project(lat, lng);
+          entry = {
+            key,
+            name_en: s.stop_name_en || s.stop_name_mm || 'Unknown Stop',
+            name_mm: s.stop_name_mm || s.stop_name_en || '',
+            road: s.road || '',
+            lat,
+            lng,
+            x: p.x,
+            z: p.z,
+            lines: new Set()
+          };
+          state.stopsMap.set(key, entry);
+        }
+        entry.lines.add(busLine);
+      }
+    }
+
+    // =========================================================================
+    // 5. THREE.JS DAYTIME 3D YANGON MAP ENGINE & REALISTIC BUS STOP SHELTERS
+    // =========================================================================
+    const container = document.getElementById('canvas-container');
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xdbeafe);
+    scene.fog = new THREE.FogExp2(0xe0f2fe, 0.00072);
+
+    const camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.5, 2600);
+    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    container.appendChild(renderer.domElement);
+
+    // Bright Daylight Lighting
+    const hemiLight = new THREE.HemisphereLight(0xf0f9ff, 0x86efac, 0.78);
+    scene.add(hemiLight);
+    const sunLight = new THREE.DirectionalLight(0xfffbeb, 1.0);
+    sunLight.position.set(180, 320, 160);
+    scene.add(sunLight);
+    const fillLight = new THREE.DirectionalLight(0xe0f2fe, 0.45);
+    fillLight.position.set(-160, 120, -140);
+    scene.add(fillLight);
+
+    // 1) Base Ocean / River Water Plane
+    const waterBaseGeo = new THREE.PlaneGeometry(3200, 3200);
+    const waterBaseMat = new THREE.MeshStandardMaterial({
+      color: 0x38bdf8,
+      roughness: 0.25,
+      metalness: 0.15
+    });
+    const waterBase = new THREE.Mesh(waterBaseGeo, waterBaseMat);
+    waterBase.rotation.x = -Math.PI / 2;
+    waterBase.position.y = -0.18;
+    scene.add(waterBase);
+
+    function addLandmassPolygon(coords, color, yHeight) {
+      const shape = new THREE.Shape();
+      coords.forEach(([lat, lng], i) => {
+        const p = project(lat, lng);
+        if (i === 0) shape.moveTo(p.x, -p.z);
+        else shape.lineTo(p.x, -p.z);
+      });
+      shape.closePath();
+
+      const extrudeSettings = { depth: yHeight || 0.35, bevelEnabled: true, bevelThickness: 0.08, bevelSize: 0.25, bevelSegments: 2 };
+      const geo = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+      geo.rotateX(-Math.PI / 2);
+      const mat = new THREE.MeshStandardMaterial({ color: color || 0xe2e8f0, roughness: 0.88, metalness: 0.02 });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.y = -0.18;
+      scene.add(mesh);
+      return mesh;
+    }
+
+    // Greater Yangon Landmasses:
+    // A) Central & Northern Yangon (Downtown to Shwepyithar / Mingaladon / North Okkalapa)
+    addLandmassPolygon([
+      [17.040, 96.045], [17.040, 96.215], [16.920, 96.208], [16.865, 96.202],
+      [16.818, 96.197], [16.792, 96.199], [16.770, 96.198], [16.766, 96.188],
+      [16.767, 96.165], [16.768, 96.142], [16.774, 96.122], [16.792, 96.112],
+      [16.822, 96.103], [16.855, 96.094], [16.890, 96.086], [16.935, 96.074],
+      [16.985, 96.058]
+    ], 0xe2e8f0, 0.36);
+
+    // B) Eastern Yangon: Thaketa, Dawbon, North/South/East Dagon & Dagon Seikkan
+    addLandmassPolygon([
+      [17.040, 96.205], [17.040, 96.380], [16.825, 96.360], [16.778, 96.285],
+      [16.768, 96.225], [16.769, 96.204], [16.795, 96.205], [16.822, 96.203],
+      [16.868, 96.208], [16.925, 96.214]
+    ], 0xdbe4ee, 0.34);
+
+    // C) Western Yangon: Hlaing Tharyar & West Hlaing River Bank
+    addLandmassPolygon([
+      [17.040, 95.950], [17.040, 96.040], [16.985, 96.050], [16.935, 96.065],
+      [16.890, 96.078], [16.855, 96.085], [16.822, 96.094], [16.790, 96.102],
+      [16.772, 96.105], [16.772, 95.950]
+    ], 0xdbe4ee, 0.32);
+
+    // D) Southern Bank: Dala & Seikgyi Kanaungto
+    addLandmassPolygon([
+      [16.758, 96.050], [16.759, 96.135], [16.758, 96.178], [16.752, 96.192],
+      [16.660, 96.195], [16.660, 96.050]
+    ], 0xd1fae5, 0.30);
+
+    // E) Southeastern Bank: Thanlyin & Kyauktan Corridor
+    addLandmassPolygon([
+      [16.760, 96.215], [16.765, 96.275], [16.805, 96.380], [16.660, 96.380],
+      [16.660, 96.205], [16.742, 96.205]
+    ], 0xd1fae5, 0.30);
+
+    // Topographic Grid
+    const gridHelper = new THREE.GridHelper(1200, 120, 0x94a3b8, 0xcbd5e1);
+    gridHelper.position.y = 0.20;
+    scene.add(gridHelper);
+
+    // Parks & Lakes
+    function addParkPatch(lat, lng, rx, rz, rot) {
+      const p = project(lat, lng);
+      const geo = new THREE.CircleGeometry(1, 32);
+      const mat = new THREE.MeshStandardMaterial({ color: 0x4ade80, roughness: 0.85 });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.rotation.x = -Math.PI / 2;
+      if (rot) mesh.rotation.z = rot;
+      mesh.scale.set(rx, rz, 1);
+      mesh.position.set(p.x, 0.21, p.z);
+      scene.add(mesh);
+    }
+    addParkPatch(16.7983, 96.1435, 13, 10, 0.2);
+    addParkPatch(16.7955, 96.1666, 14, 10, -0.2);
+    addParkPatch(16.8354, 96.1422, 22, 16, 0.4);
+    addParkPatch(16.8850, 96.1220, 14, 11, 0.1);
+    addParkPatch(16.7830, 96.1580, 9, 7, 0);
+
+    function addLakeShape(coords, color) {
+      const shape = new THREE.Shape();
+      coords.forEach(([lat, lng], i) => {
+        const p = project(lat, lng);
+        if (i === 0) shape.moveTo(p.x, -p.z);
+        else shape.lineTo(p.x, -p.z);
+      });
+      shape.closePath();
+      const geo = new THREE.ShapeGeometry(shape);
+      geo.rotateX(-Math.PI / 2);
+      const mat = new THREE.MeshStandardMaterial({ color: color || 0x0ea5e9, roughness: 0.18, metalness: 0.2 });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.y = 0.23;
+      scene.add(mesh);
+    }
+
+    addLakeShape([
+      [16.846, 96.140], [16.844, 96.149], [16.836, 96.152], [16.827, 96.148],
+      [16.825, 96.138], [16.831, 96.133], [16.839, 96.135]
+    ], 0x0284c7);
+
+    addLakeShape([
+      [16.799, 96.162], [16.798, 96.171], [16.792, 96.172], [16.791, 96.163]
+    ], 0x0ea5e9);
+
+    // Bridges (Bayintnaung, Aung Zeya, Shwepyithar, Maha Bandula, Thaketa, Thanlyin, Dala)
+    function addBridge(lat1, lng1, lat2, lng2) {
+      const p1 = project(lat1, lng1);
+      const p2 = project(lat2, lng2);
+      const dx = p2.x - p1.x;
+      const dz = p2.z - p1.z;
+      const len = Math.hypot(dx, dz);
+      const geo = new THREE.BoxGeometry(1.6, 0.45, len);
+      const mat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, emissive: 0xf59e0b, emissiveIntensity: 0.15, roughness: 0.4 });
+      const bridge = new THREE.Mesh(geo, mat);
+      bridge.position.set((p1.x + p2.x) / 2, 0.45, (p1.z + p2.z) / 2);
+      bridge.rotation.y = Math.atan2(dx, dz);
+      scene.add(bridge);
+    }
+    addBridge(16.854, 96.085, 16.855, 96.096); // Bayintnaung Bridge
+    addBridge(16.885, 96.078, 16.886, 96.088); // Aung Zeya Bridge
+    addBridge(16.952, 96.060, 16.953, 96.072); // Shwepyithar Bridge
+    addBridge(16.774, 96.197, 16.774, 96.205); // Maha Bandula Bridge
+    addBridge(16.792, 96.198, 16.792, 96.206); // Thaketa Bridge
+    addBridge(16.771, 96.204, 16.762, 96.218); // Thanlyin Bridge
+    addBridge(16.768, 96.143, 16.757, 96.145); // Yangon-Dala Bridge
+
+    // Major Greater Yangon Road Arteries (Pyay, Insein, Kaba Aye, Strand, Bogyoke, Lay Daung Kan, No.3 Hwy, Thudhamma)
+    const YANGON_MAJOR_ROADS = [
+      [[16.7749, 96.1587], [16.794, 96.143], [16.8060, 96.1333], [16.82665, 96.1307], [16.8647, 96.1332], [16.9073, 96.1332], [16.985, 96.135]],
+      [[16.82665, 96.1307], [16.855, 96.118], [16.8880, 96.1067], [16.9585, 96.0825], [17.015, 96.068]],
+      [[16.7983, 96.1496], [16.815, 96.156], [16.8354, 96.153], [16.868, 96.161], [16.9057, 96.1669], [16.985, 96.172]],
+      [[16.774, 96.124], [16.771, 96.145], [16.770, 96.165], [16.771, 96.195]],
+      [[16.778, 96.126], [16.776, 96.158], [16.776, 96.195]],
+      [[16.7955, 96.1666], [16.81018, 96.17646], [16.8278, 96.1975], [16.855, 96.235], [16.874687, 96.280012]],
+      [[16.8550, 96.015], [16.8550, 96.0667], [16.855, 96.096], [16.8647, 96.1332], [16.8825, 96.2155], [16.9155, 96.2485]],
+      [[16.7925, 96.2125], [16.8355, 96.2455], [16.8747, 96.2800]]
+    ];
+
+    const roadsGroup = new THREE.Group();
+    scene.add(roadsGroup);
+    (function buildRoadNetwork() {
+      const roadMat = new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.8 });
+      const centerLineMat = new THREE.MeshBasicMaterial({ color: 0xfef08a });
+      for (const poly of YANGON_MAJOR_ROADS) {
+        const pts = poly.map(([lat, lng]) => {
+          const p = project(lat, lng);
+          return new THREE.Vector3(p.x, 0.24, p.z);
+        });
+        const curve = new THREE.CatmullRomCurve3(pts);
+        const geo = new THREE.TubeGeometry(curve, 44, 0.65, 5, false);
+        geo.scale(1, 0.12, 1);
+        roadsGroup.add(new THREE.Mesh(geo, roadMat));
+
+        const lineGeo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(44).map(v => new THREE.Vector3(v.x, 0.30, v.z)));
+        roadsGroup.add(new THREE.Line(lineGeo, centerLineMat));
+      }
+    })();
+
+    // City Buildings & Golden Pagodas
+    const cityGroup = new THREE.Group();
+    scene.add(cityGroup);
+    (function buildCityBlocks() {
+      const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+      const matWhite = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.65, metalness: 0.08 });
+      const matGlass = new THREE.MeshStandardMaterial({ color: 0xbae6fd, roughness: 0.3, metalness: 0.35 });
+      const matStone = new THREE.MeshStandardMaterial({ color: 0xcbd5e1, roughness: 0.75, metalness: 0.1 });
+
+      let seed = 42;
+      const rand = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
+
+      for (const d of YANGON_DISTRICTS) {
+        const hub = project(d.lat, d.lng);
+        const isDowntown = d.name.includes('Sule') || d.name.includes('Botataung');
+        const count = isDowntown ? 52 : 24;
+        for (let i = 0; i < count; i++) {
+          const ang = rand() * Math.PI * 2;
+          const dist = 2.8 + rand() * (isDowntown ? 22 : 26);
+          const bx = hub.x + Math.cos(ang) * dist;
+          const bz = hub.z + Math.sin(ang) * dist;
+          const w = 1.2 + rand() * 2.4;
+          const dp = 1.2 + rand() * 2.4;
+          const h = (isDowntown ? 3.2 : 1.4) + rand() * (isDowntown ? 13.5 : 6.2);
+          const mat = rand() > 0.72 ? matGlass : (rand() > 0.4 ? matWhite : matStone);
+          const m = new THREE.Mesh(boxGeo, mat);
+          m.scale.set(w, h, dp);
+          m.position.set(bx, 0.2 + h / 2, bz);
+          cityGroup.add(m);
+        }
+
+        if (d.landmark === 'shwedagon' || d.landmark === 'stupa') {
+          const isMain = d.landmark === 'shwedagon';
+          const goldMat = new THREE.MeshStandardMaterial({
+            color: 0xfbbf24,
+            emissive: 0xd97706,
+            emissiveIntensity: 0.35,
+            roughness: 0.22,
+            metalness: 0.85
+          });
+          const base = new THREE.Mesh(new THREE.CylinderGeometry(isMain ? 4.2 : 2.6, isMain ? 5.0 : 3.2, isMain ? 2.2 : 1.2, 8), goldMat);
+          base.position.set(hub.x, 0.2 + (isMain ? 1.1 : 0.6), hub.z);
+          const spire = new THREE.Mesh(new THREE.ConeGeometry(isMain ? 3.2 : 2.0, isMain ? 15 : 8.5, 12), goldMat);
+          spire.position.set(hub.x, 0.2 + (isMain ? 9.2 : 5.2), hub.z);
+          cityGroup.add(base, spire);
+        }
+      }
+    })();
+
+    // District & River Labels
+    const labelsGroup = new THREE.Group();
+    scene.add(labelsGroup);
+    (function buildDistrictLabels() {
+      const allLabels = [
+        ...YANGON_DISTRICTS,
+        { name: 'Yangon River', mm: 'ရန်ကုန်မြစ်', lat: 16.764, lng: 96.155, isWater: true },
+        { name: 'Hlaing River', mm: 'လှိုင်မြစ်', lat: 16.865, lng: 96.090, isWater: true },
+        { name: 'Bago River', mm: 'ပဲခူးမြစ်', lat: 16.795, lng: 96.275, isWater: true }
+      ];
+      for (const d of allLabels) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 256;
+        canvas.height = 64;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = d.isWater ? 'rgba(14, 165, 233, 0.90)' : 'rgba(255, 255, 255, 0.94)';
+        ctx.strokeStyle = d.isWater ? 'rgba(255, 255, 255, 0.8)' : 'rgba(217, 119, 6, 0.8)';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.roundRect(6, 6, 244, 52, 14);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = d.isWater ? '#ffffff' : '#b45309';
+        ctx.font = 'bold 20px Inter, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(d.mm, 128, 30);
+
+        ctx.fillStyle = d.isWater ? '#e0f2fe' : '#0f172a';
+        ctx.font = '700 14px Inter, sans-serif';
+        ctx.fillText(d.name, 128, 49);
+
+        const tex = new THREE.CanvasTexture(canvas);
+        const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+        const sprite = new THREE.Sprite(mat);
+        const p = project(d.lat, d.lng);
+        sprite.position.set(p.x, d.isWater ? 3.5 : 13.0, p.z);
+        sprite.scale.set(22, 5.5, 1);
+        labelsGroup.add(sprite);
+      }
+    })();
+
+    // Dynamic Groups
+    const allRoutesGroup = new THREE.Group();
+    const stopsGroup = new THREE.Group();
+    const routesGroup = new THREE.Group();
+    const gpsGroup = new THREE.Group();
+    scene.add(allRoutesGroup);
+    scene.add(stopsGroup);
+    scene.add(routesGroup);
+    scene.add(gpsGroup);
+
+    // 3D Live GPS Marker & Pulsing Accuracy Ring
+    const gpsMarker = new THREE.Group();
+    const gpsCore = new THREE.Mesh(
+      new THREE.SphereGeometry(1.1, 16, 16),
+      new THREE.MeshStandardMaterial({ color: 0x0284c7, emissive: 0x38bdf8, emissiveIntensity: 0.7 })
+    );
+    gpsCore.position.y = 1.4;
+    const gpsPinCone = new THREE.Mesh(
+      new THREE.ConeGeometry(0.9, 1.6, 12),
+      new THREE.MeshStandardMaterial({ color: 0x0284c7, emissive: 0x0284c7, emissiveIntensity: 0.4 })
+    );
+    gpsPinCone.rotation.x = Math.PI;
+    gpsPinCone.position.y = 0.6;
+    const gpsPulseRing = new THREE.Mesh(
+      new THREE.RingGeometry(1.6, 2.5, 32),
+      new THREE.MeshBasicMaterial({ color: 0x38bdf8, side: THREE.DoubleSide, transparent: true, opacity: 0.75 })
+    );
+    gpsPulseRing.rotation.x = -Math.PI / 2;
+    gpsPulseRing.position.y = 0.35;
+
+    // 3D Live GPS Floating "YOU ARE HERE" Tag
+    const gpsLabelCanvas = document.createElement('canvas');
+    gpsLabelCanvas.width = 256;
+    gpsLabelCanvas.height = 64;
+    const gCtx = gpsLabelCanvas.getContext('2d');
+    gCtx.fillStyle = 'rgba(2, 132, 199, 0.95)';
+    gCtx.strokeStyle = '#ffffff';
+    gCtx.lineWidth = 4;
+    gCtx.beginPath();
+    gCtx.roundRect(8, 8, 240, 48, 16);
+    gCtx.fill();
+    gCtx.stroke();
+    gCtx.fillStyle = '#ffffff';
+    gCtx.font = 'bold 20px Inter, sans-serif';
+    gCtx.textAlign = 'center';
+    gCtx.fillText('📍 သင်ရောက်နေသောနေရာ', 128, 39);
+    const gpsLabelSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(gpsLabelCanvas), transparent: true, depthTest: false })
+    );
+    gpsLabelSprite.position.set(0, 4.8, 0);
+    gpsLabelSprite.scale.set(16, 4.0, 1);
+
+    gpsMarker.add(gpsCore, gpsPinCone, gpsPulseRing, gpsLabelSprite);
+    gpsMarker.visible = false;
+    gpsGroup.add(gpsMarker);
+
+    const NETWORK_PALETTE = [0xf59e0b, 0x0284c7, 0x059669, 0xe11d48, 0x7c3aed, 0xea580c];
+    function rebuildAllRoutesNetwork() {
+      while (allRoutesGroup.children.length > 0) allRoutesGroup.remove(allRoutesGroup.children[0]);
+      let idx = 0;
+      for (const [, rData] of Object.entries(state.loadedRoutes)) {
+        const stops = rData.stops || [];
+        if (stops.length < 2) continue;
+        const pts = [];
+        for (const s of stops) {
+          const lat = Number(s.latitude);
+          const lng = Number(s.longitude);
+          if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat === 0 || lng === 0) continue;
+          const p = project(lat, lng);
+          pts.push(new THREE.Vector3(p.x, 0.35 + (idx % 5) * 0.05, p.z));
+        }
+        if (pts.length < 2) continue;
+        const geo = new THREE.BufferGeometry().setFromPoints(pts);
+        const mat = new THREE.LineBasicMaterial({
+          color: NETWORK_PALETTE[idx % NETWORK_PALETTE.length],
+          transparent: true,
+          opacity: 0.45
+        });
+        allRoutesGroup.add(new THREE.Line(geo, mat));
+        idx++;
+      }
+    }
+
+    // 3D YBS Bus Mesh
+    const busGroup = new THREE.Group();
+    (function buildBusMesh() {
+      const body = new THREE.Mesh(
+        new THREE.BoxGeometry(2.2, 1.5, 4.4),
+        new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.35, metalness: 0.25 })
+      );
+      body.position.y = 1.05;
+      busGroup.add(body);
+
+      const cabin = new THREE.Mesh(
+        new THREE.BoxGeometry(2.0, 0.75, 3.8),
+        new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.2, metalness: 0.6 })
+      );
+      cabin.position.set(0, 1.35, 0.1);
+      busGroup.add(cabin);
+
+      const roof = new THREE.Mesh(
+        new THREE.BoxGeometry(1.4, 0.25, 2.2),
+        new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5 })
+      );
+      roof.position.set(0, 1.9, -0.2);
+      busGroup.add(roof);
+
+      const lightMat = new THREE.MeshBasicMaterial({ color: 0xfef08a });
+      const hl1 = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.25, 0.1), lightMat);
+      hl1.position.set(-0.65, 0.75, 2.22);
+      const hl2 = hl1.clone();
+      hl2.position.x = 0.65;
+      busGroup.add(hl1, hl2);
+
+      busGroup.visible = false;
+      scene.add(busGroup);
+    })();
+
+    // Camera Orbit, Zoom & Touch Pinch Controller
+    const camState = {
+      target: new THREE.Vector3(0, 0, 0),
+      distance: 175,
+      theta: Math.PI / 4,
+      phi: Math.PI / 3.4,
+      dragging: false,
+      panning: false,
+      lastX: 0,
+      lastY: 0,
+      moved: false,
+      keys: {},
+      pinchDist: 0
+    };
+
+    function updateCameraTransform() {
+      const sinPhi = Math.sin(camState.phi);
+      const cosPhi = Math.cos(camState.phi);
+      const sinTheta = Math.sin(camState.theta);
+      const cosTheta = Math.cos(camState.theta);
+      camera.position.set(
+        camState.target.x + camState.distance * sinPhi * sinTheta,
+        camState.target.y + camState.distance * cosPhi,
+        camState.target.z + camState.distance * sinPhi * cosTheta
+      );
+      camera.lookAt(camState.target);
+    }
+
+    function zoomCamera(factor) {
+      camState.distance = Math.max(16, Math.min(540, camState.distance * factor));
+      updateCameraTransform();
+    }
+
+    function setCameraPreset(mode) {
+      sfxClick();
+      state.sim.chaseCam = false;
+      updateChaseBtn();
+      if (mode === 'iso') {
+        camState.phi = Math.PI / 3.4;
+        camState.theta = Math.PI / 4;
+        camState.distance = 165;
+      } else if (mode === 'top') {
+        camState.phi = 0.08;
+        camState.theta = 0;
+        camState.distance = 220;
+      } else if (mode === 'reset') {
+        camState.target.set(0, 0, 0);
+        camState.phi = Math.PI / 3.4;
+        camState.theta = Math.PI / 4;
+        camState.distance = 175;
+      }
+      updateCameraTransform();
+    }
+
+    function flyCameraTo(x, z, dist) {
+      camState.target.set(x, 0, z);
+      if (dist) camState.distance = dist;
+      updateCameraTransform();
+    }
+
+    // Realistic 3D Bus Stop Shelters & Yellow YBS Signposts
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    let shelterHitMesh = null;
+    let renderedStopsList = [];
+
+    const hitGeo = new THREE.BoxGeometry(2.6, 2.8, 2.0);
+    const canopyGeo = new THREE.BoxGeometry(2.4, 0.22, 1.3);
+    const backWallGeo = new THREE.BoxGeometry(2.3, 1.6, 0.14);
+    const poleGeo = new THREE.CylinderGeometry(0.09, 0.09, 2.5, 6);
+    const signBoardGeo = new THREE.BoxGeometry(0.65, 0.85, 0.14);
+    const selectedGeo = new THREE.CylinderGeometry(1.1, 1.4, 6.8, 12);
+    const matOrigin = new THREE.MeshStandardMaterial({ color: 0x10b981, emissive: 0x059669, emissiveIntensity: 0.5 });
+    const matDest = new THREE.MeshStandardMaterial({ color: 0xe11d48, emissive: 0xbe123c, emissiveIntensity: 0.5 });
+
+    function rebuildStopBeacons() {
+      while (stopsGroup.children.length > 0) stopsGroup.remove(stopsGroup.children[0]);
+      renderedStopsList = Array.from(state.stopsMap.values());
+      const count = renderedStopsList.length;
+      document.getElementById('stops-count-pill').textContent = `${count} stops`;
+      if (count === 0) {
+        shelterHitMesh = null;
+        return;
+      }
+
+      const canopyMat = new THREE.MeshStandardMaterial({ roughness: 0.35, metalness: 0.3 });
+      const wallMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.6 });
+      const poleMat = new THREE.MeshStandardMaterial({ color: 0x64748b, metalness: 0.6 });
+      const signMat = new THREE.MeshStandardMaterial({ color: 0xfbbf24, emissive: 0xd97706, emissiveIntensity: 0.25 });
+      const hitMat = new THREE.MeshBasicMaterial({ visible: false });
+
+      const instCanopy = new THREE.InstancedMesh(canopyGeo, canopyMat, count);
+      const instWall = new THREE.InstancedMesh(backWallGeo, wallMat, count);
+      const instPole = new THREE.InstancedMesh(poleGeo, poleMat, count);
+      const instSign = new THREE.InstancedMesh(signBoardGeo, signMat, count);
+      shelterHitMesh = new THREE.InstancedMesh(hitGeo, hitMat, count);
+
+      const dummy = new THREE.Object3D();
+      const colorNormal = new THREE.Color(0x0284c7);
+      const colorHub = new THREE.Color(0xd97706);
+
+      for (let i = 0; i < count; i++) {
+        const s = renderedStopsList[i];
+        const isHub = s.lines.size >= 3;
+        const sc = isHub ? 1.25 : 0.95;
+
+        dummy.position.set(s.x, 0.25 + 1.8 * sc, s.z);
+        dummy.scale.set(sc, sc, sc);
+        dummy.updateMatrix();
+        instCanopy.setMatrixAt(i, dummy.matrix);
+        instCanopy.setColorAt(i, isHub ? colorHub : colorNormal);
+
+        dummy.position.set(s.x, 0.25 + 0.9 * sc, s.z - 0.52 * sc);
+        dummy.updateMatrix();
+        instWall.setMatrixAt(i, dummy.matrix);
+
+        dummy.position.set(s.x + 1.45 * sc, 0.25 + 1.25 * sc, s.z + 0.2 * sc);
+        dummy.updateMatrix();
+        instPole.setMatrixAt(i, dummy.matrix);
+
+        dummy.position.set(s.x + 1.45 * sc, 0.25 + 2.25 * sc, s.z + 0.2 * sc);
+        dummy.updateMatrix();
+        instSign.setMatrixAt(i, dummy.matrix);
+
+        dummy.position.set(s.x, 0.25 + 1.4 * sc, s.z);
+        dummy.updateMatrix();
+        shelterHitMesh.setMatrixAt(i, dummy.matrix);
+
+        if (s.key === state.originKey) {
+          const om = new THREE.Mesh(selectedGeo, matOrigin);
+          om.position.set(s.x, 3.6, s.z);
+          stopsGroup.add(om);
+        } else if (s.key === state.destKey) {
+          const dm = new THREE.Mesh(selectedGeo, matDest);
+          dm.position.set(s.x, 3.6, s.z);
+          stopsGroup.add(dm);
+        }
+      }
+
+      instCanopy.instanceMatrix.needsUpdate = true;
+      if (instCanopy.instanceColor) instCanopy.instanceColor.needsUpdate = true;
+      instWall.instanceMatrix.needsUpdate = true;
+      instPole.instanceMatrix.needsUpdate = true;
+      instSign.instanceMatrix.needsUpdate = true;
+      shelterHitMesh.instanceMatrix.needsUpdate = true;
+
+      stopsGroup.add(instCanopy, instWall, instPole, instSign, shelterHitMesh);
+    }
+
+    // Pointer, Touch Pinch-to-Zoom & Keyboard Events
+    const domEl = renderer.domElement;
+    domEl.addEventListener('contextmenu', e => e.preventDefault());
+    domEl.addEventListener('pointerdown', e => {
+      camState.dragging = true;
+      camState.panning = (e.button === 2 || e.shiftKey);
+      camState.lastX = e.clientX;
+      camState.lastY = e.clientY;
+      camState.moved = false;
+    });
+
+    domEl.addEventListener('touchstart', e => {
+      if (e.touches.length === 2) {
+        camState.pinchDist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+      }
+    }, { passive: true });
+
+    domEl.addEventListener('touchmove', e => {
+      if (e.touches.length === 2 && camState.pinchDist > 0) {
+        const newDist = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+        const ratio = camState.pinchDist / (newDist || 1);
+        camState.pinchDist = newDist;
+        zoomCamera(ratio);
+      }
+    }, { passive: true });
+
+    window.addEventListener('pointermove', e => {
+      if (camState.dragging) {
+        const dx = e.clientX - camState.lastX;
+        const dy = e.clientY - camState.lastY;
+        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) camState.moved = true;
+        camState.lastX = e.clientX;
+        camState.lastY = e.clientY;
+
+        if (camState.panning) {
+          const panSpeed = camState.distance * 0.0018;
+          const forward = new THREE.Vector3(-Math.sin(camState.theta), 0, -Math.cos(camState.theta));
+          const right = new THREE.Vector3(Math.cos(camState.theta), 0, -Math.sin(camState.theta));
+          camState.target.addScaledVector(right, -dx * panSpeed);
+          camState.target.addScaledVector(forward, dy * panSpeed);
+        } else {
+          camState.theta -= dx * 0.006;
+          camState.phi = Math.max(0.08, Math.min(Math.PI / 2 - 0.05, camState.phi - dy * 0.006));
+        }
+        updateCameraTransform();
+        return;
+      }
+
+      if (!shelterHitMesh) return;
+      const rect = domEl.getBoundingClientRect();
+      pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointer, camera);
+      const hits = raycaster.intersectObject(shelterHitMesh, false);
+      const tooltip = document.getElementById('stop-tooltip');
+      if (hits.length > 0 && hits[0].instanceId !== undefined) {
+        const stop = renderedStopsList[hits[0].instanceId];
+        if (stop) {
+          domEl.style.cursor = 'pointer';
+          document.getElementById('tooltip-title').textContent = stop.name_mm || stop.name_en;
+          document.getElementById('tooltip-sub').textContent = stop.name_en;
+          document.getElementById('tooltip-road').textContent = stop.road || 'Yangon';
+          const linesEl = document.getElementById('tooltip-lines');
+          linesEl.innerHTML = Array.from(stop.lines).slice(0, 6).map(l => `<span class="px-1.5 py-0.5 rounded bg-amber-400/20 text-amber-300 text-[10px] font-bold">YBS ${l}</span>`).join('');
+          tooltip.style.left = `${Math.min(e.clientX + 14, window.innerWidth - 270)}px`;
+          tooltip.style.top = `${Math.min(e.clientY + 14, window.innerHeight - 110)}px`;
+          tooltip.classList.remove('hidden');
+          return;
+        }
+      }
+      domEl.style.cursor = 'grab';
+      tooltip.classList.add('hidden');
+    });
+
+    window.addEventListener('pointerup', e => {
+      if (camState.dragging && !camState.moved && e.target === domEl && shelterHitMesh) {
+        const rect = domEl.getBoundingClientRect();
+        pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        raycaster.setFromCamera(pointer, camera);
+        const hits = raycaster.intersectObject(shelterHitMesh, false);
+        if (hits.length > 0 && hits[0].instanceId !== undefined) {
+          const stop = renderedStopsList[hits[0].instanceId];
+          if (stop) openStopModal(stop);
+        }
+      }
+      camState.dragging = false;
+    });
+
+    domEl.addEventListener('wheel', e => {
+      e.preventDefault();
+      camState.distance = Math.max(16, Math.min(540, camState.distance + e.deltaY * 0.14));
+      updateCameraTransform();
+    }, { passive: false });
+
+    window.addEventListener('keydown', e => {
+      if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+      if (e.key === '+' || e.key === '=') zoomCamera(0.82);
+      if (e.key === '-' || e.key === '_') zoomCamera(1.22);
+      camState.keys[e.key.toLowerCase()] = true;
+    });
+    window.addEventListener('keyup', e => {
+      camState.keys[e.key.toLowerCase()] = false;
+    });
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // =========================================================================
+    // 6. REAL PHONE LIVE GPS LOCATION & UPCOMING STOP TRACKER
+    // =========================================================================
+    function updateUpcomingStopFromLiveGPS(lat, lng) {
+      if (!state.activeJourney || !state.activeJourney.legs || state.activeJourney.legs.length === 0) return;
+
+      // Flatten all stops along the active journey to find closest & next upcoming stop
+      const flatStops = [];
+      state.activeJourney.legs.forEach(leg => {
+        leg.stops.forEach(s => {
+          flatStops.push({
+            bus_line: leg.bus_line,
+            stop: s,
+            dist: haversineMeters(lat, lng, Number(s.latitude), Number(s.longitude))
+          });
+        });
+      });
+      if (flatStops.length === 0) return;
+
+      let closestIdx = 0;
+      for (let i = 1; i < flatStops.length; i++) {
+        if (flatStops[i].dist < flatStops[closestIdx].dist) closestIdx = i;
+      }
+
+      const curItem = flatStops[closestIdx];
+      const nextItem = flatStops[Math.min(flatStops.length - 1, closestIdx + 1)];
+      const remaining = Math.max(0, flatStops.length - 1 - closestIdx);
+
+      document.getElementById('sim-bus-label').textContent = `YBS ${curItem.bus_line} (Live GPS)`;
+      document.getElementById('sim-remaining-badge').textContent = `${remaining} stops left`;
+      document.getElementById('sim-current-label').textContent = `ယခုအနီးဆုံး: ${curItem.stop.stop_name_mm || curItem.stop.stop_name_en} (${formatDistance(curItem.dist)})`;
+      document.getElementById('sim-next-stop-label').textContent = nextItem.stop.stop_name_mm || nextItem.stop.stop_name_en;
+      document.getElementById('sim-next-dist').textContent = formatDistance(nextItem.dist);
+    }
+
+    function updateGpsPosition(lat, lng, accuracy, isDemo, shouldFly) {
+      state.gps.active = true;
+      state.gps.lat = lat;
+      state.gps.lng = lng;
+      state.gps.accuracy = accuracy || 20;
+
+      const p = project(lat, lng);
+      gpsMarker.position.set(p.x, 0.25, p.z);
+      gpsMarker.visible = true;
+
+      // Compute nearest YBS stops sorted by Haversine distance
+      const allStops = Array.from(state.stopsMap.values());
+      const withDist = allStops.map(s => ({
+        stop: s,
+        dist: haversineMeters(lat, lng, s.lat, s.lng)
+      }));
+      withDist.sort((a, b) => a.dist - b.dist);
+      state.gps.nearestStops = withDist.slice(0, 15);
+
+      document.getElementById('gps-pulse-dot').classList.add('animate-ping');
+      document.getElementById('gps-btn-label').textContent = isDemo ? 'GPS (Demo)' : 'Phone GPS Live';
+      document.getElementById('gps-status-badge').textContent = isDemo ? 'Demo Location' : `Phone GPS (±${Math.round(state.gps.accuracy)}m)`;
+      document.getElementById('gps-status-badge').className = 'text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold';
+
+      const nearest = state.gps.nearestStops[0];
+      const nextNearest = state.gps.nearestStops[1];
+      document.getElementById('gps-coords-text').innerHTML = `
+        <div><strong>တည်နေရာ (GPS):</strong> ${lat.toFixed(5)}, ${lng.toFixed(5)}</div>
+        ${nearest ? `<div class="text-amber-300 font-bold mt-0.5">📍 အနီးဆုံးမှတ်တိုင်: ${nearest.stop.name_mm || nearest.stop.name_en} (${formatDistance(nearest.dist)})</div>` : ''}
+        ${nextNearest ? `<div class="text-sky-300 text-[10px] mt-0.5">➡️ နောက်တစ်မှတ်တိုင်: ${nextNearest.stop.name_mm || nextNearest.stop.name_en} (${formatDistance(nextNearest.dist)})</div>` : ''}
+      `;
+
+      updateUpcomingStopFromLiveGPS(lat, lng);
+      renderNearbyStops();
+      if (shouldFly) flyCameraTo(p.x, p.z, 55);
+    }
+
+    function locateUserGPS(silent) {
+      if (!silent) sfxClick();
+      if (!navigator.geolocation) {
+        if (!silent) showToast('Phone GPS not supported — using Demo GPS');
+        updateGpsPosition(16.82665, 96.1307, 20, true, true);
+        return;
+      }
+      if (!silent) showToast('ဖုန်း GPS ဖြင့် သင့်တည်နေရာကို ရှာဖွေနေပါသည်...');
+      navigator.geolocation.getCurrentPosition(
+        pos => {
+          updateGpsPosition(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy, false, true);
+          if (!silent) showToast('Real Phone GPS ချိတ်ဆက်ပြီးပါပြီ!');
+          if (state.gps.watchId === null) {
+            state.gps.watchId = navigator.geolocation.watchPosition(
+              wPos => updateGpsPosition(wPos.coords.latitude, wPos.coords.longitude, wPos.coords.accuracy, false, false),
+              () => {},
+              { enableHighAccuracy: true, maximumAge: 3000, timeout: 15000 }
+            );
+          }
+        },
+        (err) => {
+          const reason = err && err.code === 1 ? 'GPS Permission ပိတ်ထားပါသည်' : 'GPS Signal မမိသေးပါ';
+          if (!silent) showToast(`${reason} — Demo GPS ပြသပေးထားပါသည်`);
+          updateGpsPosition(16.82665, 96.1307, 25, true, true);
+        },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      );
+    }
+
+    function renderNearbyStops() {
+      const listEl = document.getElementById('nearby-stops-list');
+      if (!state.gps.active || state.gps.nearestStops.length === 0) return;
+
+      listEl.innerHTML = '';
+      state.gps.nearestStops.forEach(({ stop, dist }, idx) => {
+        const card = document.createElement('div');
+        card.className = `rounded-xl p-2.5 border transition ${idx === 0 ? 'bg-sky-500/10 border-sky-400/40' : 'bg-slate-900/75 border-slate-800'}`;
+        const linesHtml = Array.from(stop.lines).slice(0, 6).map(l => `<span class="px-1.5 py-0.5 rounded bg-amber-400/20 text-amber-300 text-[10px] font-bold">YBS ${l}</span>`).join('');
+        card.innerHTML = `
+          <div class="flex items-start justify-between gap-2">
+            <div class="min-w-0">
+              <div class="text-xs font-bold text-white truncate">${stop.name_mm || stop.name_en}</div>
+              <div class="text-[10px] text-slate-400 truncate">${stop.name_en}${stop.road ? ' · ' + stop.road : ''}</div>
+            </div>
+            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 shrink-0">${formatDistance(dist)}</span>
+          </div>
+          <div class="flex flex-wrap gap-1 mt-1.5">${linesHtml}</div>
+          <div class="grid grid-cols-3 gap-1.5 mt-2 pt-2 border-t border-slate-800/80">
+            <button type="button" class="near-origin-btn py-1 rounded-lg bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 text-[10px] font-bold cursor-pointer">From Here</button>
+            <button type="button" class="near-dest-btn py-1 rounded-lg bg-rose-500/20 text-rose-300 hover:bg-rose-500/30 text-[10px] font-bold cursor-pointer">To Here</button>
+            <button type="button" class="near-view-btn py-1 rounded-lg bg-slate-800 text-slate-200 hover:bg-slate-700 text-[10px] font-semibold cursor-pointer">3D View</button>
+          </div>
+        `;
+        card.querySelector('.near-origin-btn').addEventListener('click', () => {
+          sfxClick();
+          setOriginStop(stop);
+          switchTab('finder');
+        });
+        card.querySelector('.near-dest-btn').addEventListener('click', () => {
+          sfxClick();
+          setDestStop(stop);
+          switchTab('finder');
+          if (state.originKey) runRouteSearch();
+        });
+        card.querySelector('.near-view-btn').addEventListener('click', () => {
+          sfxClick();
+          flyCameraTo(stop.x, stop.z, 42);
+        });
+        listEl.appendChild(card);
+      });
+    }
+
+    // =========================================================================
+    // 7. 3D ROUTE RENDERING & BUS ANIMATION
+    // =========================================================================
+    const LEG_COLORS = [0xd97706, 0x0284c7, 0xe11d48];
+
+    function clear3DRoute() {
+      while (routesGroup.children.length > 0) routesGroup.remove(routesGroup.children[0]);
+      state.sim.playing = false;
+      state.sim.curves = [];
+      state.sim.legMeta = [];
+      busGroup.visible = false;
+      document.getElementById('sim-bar').classList.add('hidden');
+    }
+
+    function renderJourneyIn3D(journey) {
+      clear3DRoute();
+      if (!journey || !journey.legs || journey.legs.length === 0) return;
+
+      const allPoints = [];
+      const curves = [];
+      const legMeta = [];
+
+      journey.legs.forEach((leg, idx) => {
+        const pts = leg.stops.map(s => {
+          const p = project(Number(s.latitude), Number(s.longitude));
+          return new THREE.Vector3(p.x, 1.6 + idx * 0.45, p.z);
+        });
+        if (pts.length < 2) return;
+        allPoints.push(...pts);
+
+        const curve = new THREE.CatmullRomCurve3(pts);
+        const tubeGeo = new THREE.TubeGeometry(curve, Math.max(24, pts.length * 4), 0.7, 8, false);
+        const tubeMat = new THREE.MeshStandardMaterial({
+          color: LEG_COLORS[idx % LEG_COLORS.length],
+          emissive: LEG_COLORS[idx % LEG_COLORS.length],
+          emissiveIntensity: 0.3,
+          roughness: 0.3
+        });
+        routesGroup.add(new THREE.Mesh(tubeGeo, tubeMat));
+
+        // Add Transfer Hub Ring if multi-leg
+        if (idx > 0) {
+          const transferRing = new THREE.Mesh(
+            new THREE.TorusGeometry(1.8, 0.32, 10, 24),
+            new THREE.MeshStandardMaterial({ color: 0xfbbf24, emissive: 0xd97706, emissiveIntensity: 0.5 })
+          );
+          transferRing.rotation.x = Math.PI / 2;
+          transferRing.position.set(pts[0].x, 2.2, pts[0].z);
+          routesGroup.add(transferRing);
+        }
+
+        curves.push(curve);
+        legMeta.push({ bus_line: leg.bus_line, stops: leg.stops, len: curve.getLength() });
+      });
+
+      if (curves.length === 0) return;
+
+      const box = new THREE.Box3().setFromPoints(allPoints);
+      const center = new THREE.Vector3();
+      box.getCenter(center);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const span = Math.max(size.x, size.z, 45);
+      flyCameraTo(center.x, center.z, Math.min(300, span * 1.45));
+
+      state.sim.curves = curves;
+      state.sim.legMeta = legMeta;
+      state.sim.totalLength = legMeta.reduce((acc, m) => acc + m.len, 0) || 1;
+      state.sim.progress = 0;
+      state.sim.playing = true;
+      busGroup.visible = true;
+
+      document.getElementById('sim-bar').classList.remove('hidden');
+      updateSimPlayIcon();
+      sfxDepart();
+    }
+
+    let lastTime = performance.now();
+    let pulseClock = 0;
+    function animate(now) {
+      requestAnimationFrame(animate);
+      const dt = Math.min(0.05, (now - lastTime) / 1000);
+      lastTime = now;
+      pulseClock += dt;
+
+      if (gpsMarker.visible) {
+        const s = 1 + 0.45 * Math.sin(pulseClock * 3.5);
+        gpsPulseRing.scale.set(s, s, 1);
+      }
+
+      const panStep = camState.distance * 0.65 * dt;
+      const forward = new THREE.Vector3(-Math.sin(camState.theta), 0, -Math.cos(camState.theta));
+      const right = new THREE.Vector3(Math.cos(camState.theta), 0, -Math.sin(camState.theta));
+      let movedKey = false;
+      if (camState.keys['w'] || camState.keys['arrowup']) { camState.target.addScaledVector(forward, panStep); movedKey = true; }
+      if (camState.keys['s'] || camState.keys['arrowdown']) { camState.target.addScaledVector(forward, -panStep); movedKey = true; }
+      if (camState.keys['a'] || camState.keys['arrowleft']) { camState.target.addScaledVector(right, -panStep); movedKey = true; }
+      if (camState.keys['d'] || camState.keys['arrowright']) { camState.target.addScaledVector(right, panStep); movedKey = true; }
+      if (movedKey) updateCameraTransform();
+
+      if (state.sim.playing && state.sim.curves.length > 0) {
+        const speedUnits = 24 * state.sim.speed;
+        state.sim.progress += (speedUnits * dt) / state.sim.totalLength;
+        if (state.sim.progress >= 1) {
+          state.sim.progress = 0;
+          sfxArrive();
+        }
+
+        const targetDist = state.sim.progress * state.sim.totalLength;
+        let accum = 0;
+        for (let i = 0; i < state.sim.curves.length; i++) {
+          const legLen = state.sim.legMeta[i].len;
+          if (targetDist <= accum + legLen || i === state.sim.curves.length - 1) {
+            const localT = Math.max(0, Math.min(1, (targetDist - accum) / (legLen || 1)));
+            const pos = state.sim.curves[i].getPointAt(localT);
+            const tangent = state.sim.curves[i].getTangentAt(localT);
+            busGroup.position.copy(pos);
+            busGroup.lookAt(pos.clone().add(tangent));
+
+            const stops = state.sim.legMeta[i].stops;
+            const stopIdx = Math.min(stops.length - 1, Math.floor(localT * stops.length));
+            const nextStopIdx = Math.min(stops.length - 1, stopIdx + 1);
+            const curStop = stops[stopIdx];
+            const nextStop = stops[nextStopIdx];
+            const remainingStops = Math.max(0, stops.length - 1 - stopIdx);
+
+            document.getElementById('sim-bus-label').textContent = `YBS ${state.sim.legMeta[i].bus_line}`;
+            document.getElementById('sim-remaining-badge').textContent = `${remainingStops} stops left`;
+            document.getElementById('sim-current-label').textContent = curStop ? `ယခု: ${curStop.stop_name_mm || curStop.stop_name_en}` : '';
+            document.getElementById('sim-next-stop-label').textContent = nextStop
+              ? `${nextStop.stop_name_mm || nextStop.stop_name_en} (${nextStop.stop_name_en || ''})`
+              : 'Destination Reached';
+            if (curStop && nextStop) {
+              const dMeters = haversineMeters(Number(curStop.latitude), Number(curStop.longitude), Number(nextStop.latitude), Number(nextStop.longitude));
+              document.getElementById('sim-next-dist').textContent = formatDistance(dMeters);
+            }
+
+            if (state.sim.chaseCam) {
+              camState.target.lerp(pos, 0.12);
+              camState.distance = THREE.MathUtils.lerp(camState.distance, 38, 0.08);
+              updateCameraTransform();
+            }
+            break;
+          }
+          accum += legLen;
+        }
+      }
+
+      renderer.render(scene, camera);
+    }
+
+    // =========================================================================
+    // 8. BFS ROUTE FINDER ENGINE (DIRECT + 1 & 2 BUS TRANSFERS)
+    // =========================================================================
+    function findRoutes(originKey, destKey) {
+      const origin = state.stopsMap.get(originKey);
+      const dest = state.stopsMap.get(destKey);
+      if (!origin || !dest || originKey === destKey) return [];
+
+      const routeStopIndices = {};
+      for (const [line, rData] of Object.entries(state.loadedRoutes)) {
+        const idxMap = new Map();
+        (rData.stops || []).forEach((s, idx) => {
+          const k = makeStopKey(s);
+          if (!idxMap.has(k)) idxMap.set(k, idx);
+        });
+        routeStopIndices[line] = idxMap;
+      }
+
+      const results = [];
+      function sliceStops(line, kA, kB) {
+        const stops = state.loadedRoutes[line]?.stops || [];
+        const iA = routeStopIndices[line]?.get(kA);
+        const iB = routeStopIndices[line]?.get(kB);
+        if (iA === undefined || iB === undefined || iA === iB) return null;
+        return iA < iB ? stops.slice(iA, iB + 1) : stops.slice(iB, iA + 1).reverse();
+      }
+
+      // 1) Direct (0 transfers)
+      for (const line of origin.lines) {
+        if (dest.lines.has(line)) {
+          const seg = sliceStops(line, originKey, destKey);
+          if (seg && seg.length >= 2) {
+            results.push({ transfers: 0, totalStops: seg.length, legs: [{ bus_line: line, from: origin, to: dest, stops: seg }] });
+          }
+        }
+      }
+
+      // 2) 1-Transfer (Change bus once at shared stop)
+      if (results.length < 5) {
+        for (const lineA of origin.lines) {
+          const stopsA = state.loadedRoutes[lineA]?.stops || [];
+          for (const midRaw of stopsA) {
+            const midKey = makeStopKey(midRaw);
+            if (midKey === originKey || midKey === destKey) continue;
+            const midStop = state.stopsMap.get(midKey);
+            if (!midStop) continue;
+            for (const lineB of midStop.lines) {
+              if (lineB === lineA || !dest.lines.has(lineB)) continue;
+              const segA = sliceStops(lineA, originKey, midKey);
+              const segB = sliceStops(lineB, midKey, destKey);
+              if (segA && segB && segA.length >= 2 && segB.length >= 2) {
+                results.push({
+                  transfers: 1,
+                  totalStops: segA.length + segB.length - 1,
+                  legs: [
+                    { bus_line: lineA, from: origin, to: midStop, stops: segA },
+                    { bus_line: lineB, from: midStop, to: dest, stops: segB }
+                  ]
+                });
+              }
+            }
+          }
+        }
+      }
+
+      // 3) 2-Transfer (Change bus twice)
+      if (results.length === 0) {
+        outer: for (const lineA of origin.lines) {
+          for (const m1Raw of (state.loadedRoutes[lineA]?.stops || [])) {
+            const m1Key = makeStopKey(m1Raw);
+            const m1 = state.stopsMap.get(m1Key);
+            if (!m1 || m1Key === originKey) continue;
+            for (const lineB of m1.lines) {
+              if (lineB === lineA) continue;
+              for (const m2Raw of (state.loadedRoutes[lineB]?.stops || [])) {
+                const m2Key = makeStopKey(m2Raw);
+                const m2 = state.stopsMap.get(m2Key);
+                if (!m2 || m2Key === m1Key || m2Key === originKey) continue;
+                for (const lineC of m2.lines) {
+                  if (lineC === lineB || !dest.lines.has(lineC)) continue;
+                  const sA = sliceStops(lineA, originKey, m1Key);
+                  const sB = sliceStops(lineB, m1Key, m2Key);
+                  const sC = sliceStops(lineC, m2Key, destKey);
+                  if (sA && sB && sC) {
+                    results.push({
+                      transfers: 2,
+                      totalStops: sA.length + sB.length + sC.length - 2,
+                      legs: [
+                        { bus_line: lineA, from: origin, to: m1, stops: sA },
+                        { bus_line: lineB, from: m1, to: m2, stops: sB },
+                        { bus_line: lineC, from: m2, to: dest, stops: sC }
+                      ]
+                    });
+                    if (results.length >= 4) break outer;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      const seen = new Set();
+      const unique = [];
+      results.sort((a, b) => a.transfers - b.transfers || a.totalStops - b.totalStops);
+      for (const r of results) {
+        const sig = r.legs.map(l => `${l.bus_line}:${l.from.key}->${l.to.key}`).join('|');
+        if (!seen.has(sig)) {
+          seen.add(sig);
+          unique.push(r);
+        }
+        if (unique.length >= 5) break;
+      }
+      return unique;
+    }
+
+    // =========================================================================
+    // 9. DATA SYNC (DUAL GITHUB RAW + JSDELIVR CDN + INDEXEDDB + LOCAL IMPORT)
+    // =========================================================================
+    async function fetchJsonWithFallback(urls) {
+      for (const u of urls) {
+        if (!u) continue;
+        try {
+          const res = await fetch(u);
+          if (res.ok) return await res.json();
+        } catch (e) {}
+      }
+      return null;
+    }
+
+    async function fetchRouteDetail(routeItem) {
+      const line = String(routeItem.bus_line);
+      if (state.loadedRoutes[line] && state.loadedRoutes[line].stops.length > 10) return state.loadedRoutes[line];
+      const cdnUrl = routeItem.data_file ? (CDN_BASE + routeItem.data_file) : null;
+      const data = await fetchJsonWithFallback([routeItem.data_url, cdnUrl]);
+      if (data) {
+        ingestRouteData(line, data);
+        return data;
+      }
+      return state.loadedRoutes[line] || null;
+    }
+
+    async function syncFromGitHub() {
+      document.getElementById('sync-status-text').textContent = 'Syncing GitHub / CDN...';
+      const catalogData = await fetchJsonWithFallback(CATALOG_URLS);
+      if (catalogData && Array.isArray(catalogData.routes) && catalogData.routes.length > 0) {
+        state.catalog = catalogData.routes;
+        await idbSet('catalog', state.catalog);
+        renderLinesList();
+
+        const total = state.catalog.length;
+        const queue = [...state.catalog];
+        let done = 0;
+        updateSyncUI(0, total, 'Syncing 147 YBS Routes...');
+
+        const BATCH = 12;
+        for (let i = 0; i < queue.length; i += BATCH) {
+          const slice = queue.slice(i, i + BATCH);
+          await Promise.all(slice.map(async item => {
+            await fetchRouteDetail(item);
+            done++;
+          }));
+          updateSyncUI(done, total, done >= total ? 'All 147 YBS Routes Live' : 'Syncing 147 YBS Routes...');
+          rebuildStopBeacons();
+          rebuildAllRoutesNetwork();
+          if (state.gps.active) updateGpsPosition(state.gps.lat, state.gps.lng, state.gps.accuracy, false);
+        }
+
+        await idbSet('routes', state.loadedRoutes);
+        renderLinesList();
+        showToast('All 147 YBS routes loaded onto 3D Map!');
+      } else {
+        updateSyncUI(Object.keys(state.loadedRoutes).length, state.catalog.length, 'Starter Network Ready (Offline)');
+      }
+    }
+
+    async function initData() {
+      state.catalog = [...FALLBACK_CATALOG];
+      for (const [line, rData] of Object.entries(FALLBACK_ROUTES)) {
+        ingestRouteData(line, rData);
+      }
+      rebuildStopBeacons();
+      rebuildAllRoutesNetwork();
+      renderLinesList();
+      renderQuickDemos();
+      updateSyncUI(Object.keys(state.loadedRoutes).length, state.catalog.length, 'Starter Network Ready');
+
+      const cachedCat = await idbGet('catalog');
+      const cachedRoutes = await idbGet('routes');
+      if (Array.isArray(cachedCat) && cachedRoutes) {
+        state.catalog = cachedCat;
+        for (const [line, rData] of Object.entries(cachedRoutes)) {
+          ingestRouteData(line, rData);
+        }
+        rebuildStopBeacons();
+        rebuildAllRoutesNetwork();
+        renderLinesList();
+        updateSyncUI(Object.keys(state.loadedRoutes).length, state.catalog.length, 'Cached 147-Route Data');
+      }
+
+      await syncFromGitHub();
+    }
+
+    async function handleLocalJsonImport(files) {
+      if (!files || files.length === 0) return;
+      let importedRoutes = 0;
+      let importedCatalog = false;
+
+      for (const file of files) {
+        try {
+          const text = await file.text();
+          const json = JSON.parse(text);
+          if (Array.isArray(json.routes)) {
+            state.catalog = json.routes;
+            importedCatalog = true;
+          } else if (json.bus_line && Array.isArray(json.stops)) {
+            const line = String(json.bus_line);
+            ingestRouteData(line, json);
+            if (!state.catalog.some(c => String(c.bus_line) === line)) {
+              state.catalog.push({
+                bus_line: line,
+                route_name: line,
+                line_name: json.route_info?.['Line Name'] || `YBS ${line}`,
+                agency: json.route_info?.['Agency'] || 'YBS',
+                total_stops: json.stops.length,
+                qr_payment: json.route_info?.['QR Payment'] || ''
+              });
+            }
+            importedRoutes++;
+          }
+        } catch (e) {}
+      }
+
+      if (importedCatalog) await idbSet('catalog', state.catalog);
+      if (importedRoutes > 0) await idbSet('routes', state.loadedRoutes);
+      rebuildStopBeacons();
+      rebuildAllRoutesNetwork();
+      renderLinesList();
+      updateSyncUI(Object.keys(state.loadedRoutes).length, state.catalog.length, 'Local JSON Imported');
+      updateDataModalStats();
+      showToast(`Imported ${importedRoutes} YBS route files!`);
+    }
+
+    function updateSyncUI(done, total, label) {
+      const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 100;
+      state.syncMode = label;
+      document.getElementById('sync-status-text').textContent = label;
+      document.getElementById('sync-count').textContent = `${done} / ${total} Routes`;
+      document.getElementById('sync-bar').style.width = `${pct}%`;
+      if (done >= total && total > 5) {
+        document.getElementById('sync-dot').classList.remove('animate-pulse', 'bg-amber-400');
+        document.getElementById('sync-dot').classList.add('bg-emerald-400');
+      }
+    }
+
+    function updateDataModalStats() {
+      document.getElementById('data-modal-stats').innerHTML = `
+        <div><strong class="text-white">Status:</strong> <span class="text-amber-300">${state.syncMode}</span></div>
+        <div><strong class="text-white">Loaded Routes:</strong> ${Object.keys(state.loadedRoutes).length} / ${state.catalog.length}</div>
+        <div><strong class="text-white">3D Bus Stops:</strong> ${state.stopsMap.size}</div>
+      `;
+    }
+
+    // =========================================================================
+    // 10. UI INTERACTIONS, SEARCH & RENDERING
+    // =========================================================================
+    function showToast(msg) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.classList.remove('hidden');
+      clearTimeout(el._timer);
+      el._timer = setTimeout(() => el.classList.add('hidden'), 2800);
+    }
+
+    function switchTab(target) {
+      state.activeTab = target;
+      document.querySelectorAll('.tab-btn').forEach(b => {
+        if (b.dataset.tab === target) {
+          b.classList.add('bg-amber-400', 'text-slate-950', 'shadow');
+          b.classList.remove('text-slate-300');
+        } else {
+          b.classList.remove('bg-amber-400', 'text-slate-950', 'shadow');
+          b.classList.add('text-slate-300');
+        }
+      });
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
+      document.getElementById(`tab-${target}`).classList.remove('hidden');
+    }
+
+    function searchStops(query) {
+      const q = (query || '').trim().toLowerCase();
+      const all = Array.from(state.stopsMap.values());
+      if (!q) {
+        if (state.gps.active && state.gps.nearestStops.length > 0) {
+          return state.gps.nearestStops.map(x => x.stop);
+        }
+        return all.slice(0, 15);
+      }
+      return all.filter(s =>
+        s.name_en.toLowerCase().includes(q) ||
+        s.name_mm.toLowerCase().includes(q) ||
+        s.road.toLowerCase().includes(q)
+      ).slice(0, 18);
+    }
+
+    function setupStopAutocomplete(inputId, dropdownId, onSelect) {
+      const input = document.getElementById(inputId);
+      const dd = document.getElementById(dropdownId);
+
+      function renderDD() {
+        const matches = searchStops(input.value);
+        if (matches.length === 0) {
+          dd.innerHTML = '<div class="p-2 text-[11px] text-slate-400">No matching stop found</div>';
+        } else {
+          dd.innerHTML = '';
+          for (const s of matches) {
+            const distBadge = (state.gps.active && state.gps.lat !== null)
+              ? `<span class="text-[10px] text-sky-300 mr-1">${formatDistance(haversineMeters(state.gps.lat, state.gps.lng, s.lat, s.lng))}</span>`
+              : '';
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-amber-400/15 transition flex items-center justify-between gap-2 cursor-pointer';
+            btn.innerHTML = `
+              <div class="min-w-0">
+                <div class="text-xs font-semibold text-white truncate">${s.name_mm || s.name_en}</div>
+                <div class="text-[10px] text-slate-400 truncate">${s.name_en}${s.road ? ' · ' + s.road : ''}</div>
+              </div>
+              <div class="shrink-0 flex items-center">
+                ${distBadge}
+                <span class="text-[10px] text-amber-300 font-bold">${s.lines.size} lines</span>
+              </div>
+            `;
+            btn.addEventListener('click', () => {
+              sfxClick();
+              input.value = s.name_mm || s.name_en;
+              dd.classList.add('hidden');
+              onSelect(s);
+            });
+            dd.appendChild(btn);
+          }
+        }
+        dd.classList.remove('hidden');
+      }
+
+      input.addEventListener('focus', renderDD);
+      input.addEventListener('input', renderDD);
+      document.addEventListener('click', e => {
+        if (!input.contains(e.target) && !dd.contains(e.target)) dd.classList.add('hidden');
+      });
+    }
+
+    function setOriginStop(stop) {
+      state.originKey = stop.key;
+      document.getElementById('origin-input').value = stop.name_mm || stop.name_en;
+      rebuildStopBeacons();
+      flyCameraTo(stop.x, stop.z, 75);
+    }
+
+    function setDestStop(stop) {
+      state.destKey = stop.key;
+      document.getElementById('dest-input').value = stop.name_mm || stop.name_en;
+      rebuildStopBeacons();
+      flyCameraTo(stop.x, stop.z, 75);
+    }
+
+    function handleSmartAIQuery() {
+      const raw = document.getElementById('ai-query-input').value.trim();
+      if (!raw) return;
+      sfxClick();
+      const parts = raw.split(/\s+(?:to|မှ|->|—|-)\s+/i);
+      if (parts.length >= 2) {
+        const m1 = searchStops(parts[0]);
+        const m2 = searchStops(parts[1]);
+        if (m1.length > 0 && m2.length > 0) {
+          setOriginStop(m1[0]);
+          setDestStop(m2[0]);
+          runRouteSearch();
+          return;
+        }
+      }
+      const m = searchStops(raw);
+      if (m.length > 0) {
+        if (state.gps.active && state.gps.nearestStops.length > 0 && !state.originKey) {
+          setOriginStop(state.gps.nearestStops[0].stop);
+          setDestStop(m[0]);
+          runRouteSearch();
+        } else {
+          flyCameraTo(m[0].x, m[0].z, 55);
+          openStopModal(m[0]);
+        }
+      } else {
+        showToast('Stop not found in loaded dataset yet');
+      }
+    }
+
+    function runRouteSearch() {
+      if (!state.originKey || !state.destKey) {
+        showToast('Please select both Origin and Destination stops');
+        return;
+      }
+      if (state.originKey === state.destKey) {
+        showToast('Origin and Destination are the same stop');
+        return;
+      }
+      const journeys = findRoutes(state.originKey, state.destKey);
+      state.foundJourneys = journeys;
+      renderRouteResults(journeys);
+      if (journeys.length > 0) {
+        sfxFound();
+        state.activeJourney = journeys[0];
+        renderJourneyIn3D(journeys[0]);
+      } else {
+        showToast('No route found — try syncing all 147 routes');
+      }
+    }
+
+    function renderRouteResults(journeys) {
+      const containerEl = document.getElementById('route-results');
+      if (!journeys || journeys.length === 0) {
+        containerEl.innerHTML = `
+          <div class="rounded-xl bg-rose-500/10 border border-rose-400/30 p-3 text-xs text-rose-200">
+            No direct or transfer route found between these stops in currently loaded lines.
+          </div>`;
+        return;
+      }
+
+      containerEl.innerHTML = '';
+      journeys.forEach((j, idx) => {
+        const card = document.createElement('div');
+        card.className = `rounded-xl p-3 border transition cursor-pointer ${idx === 0 ? 'bg-amber-400/10 border-amber-400/45' : 'bg-slate-900/75 border-slate-800 hover:border-amber-400/35'}`;
+
+        const badges = j.legs.map(l => `<span class="px-2 py-0.5 rounded-lg bus-badge text-xs">YBS ${l.bus_line}</span>`).join('<span class="text-slate-400 text-xs">→</span>');
+        const transferText = j.transfers === 0 ? 'Direct (တိုက်ရိုက်)' : `${j.transfers} Transfer (ကားပြောင်းစီးရန်)`;
+
+        const legsHtml = j.legs.map((l, li) => `
+          <div class="flex items-start gap-2 text-[11px] mt-2 pt-2 border-t border-slate-800/80">
+            <span class="w-2 h-2 rounded-full mt-1 shrink-0" style="background:${li === 0 ? '#fbbf24' : (li === 1 ? '#38bdf8' : '#f43f5e')}"></span>
+            <div class="min-w-0">
+              <div class="font-semibold text-white">
+                ${li > 0 ? '<span class="text-sky-300 font-bold">[ကားပြောင်းစီး] </span>' : ''}
+                Board <span class="text-amber-300">YBS ${l.bus_line}</span> at ${l.from.name_mm || l.from.name_en}
+              </div>
+              <div class="text-slate-400">${l.stops.length} stops → Alight at <span class="text-slate-200">${l.to.name_mm || l.to.name_en}</span></div>
+            </div>
+          </div>
+        `).join('');
+
+        card.innerHTML = `
+          <div class="flex items-center justify-between gap-2">
+            <div class="flex items-center gap-1.5 flex-wrap">${badges}</div>
+            <span class="text-[10px] font-bold px-2 py-0.5 rounded-full ${j.transfers === 0 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-sky-500/20 text-sky-300'}">${transferText} · ${j.totalStops} stops</span>
+          </div>
+          ${legsHtml}
+        `;
+        card.addEventListener('click', () => {
+          sfxClick();
+          state.activeJourney = j;
+          renderJourneyIn3D(j);
+        });
+        containerEl.appendChild(card);
+      });
+    }
+
+    function renderLinesList() {
+      const listEl = document.getElementById('lines-list');
+      const q = (document.getElementById('line-search-input').value || '').trim().toLowerCase();
+      const filtered = state.catalog.filter(r => {
+        if (state.lineFilter === 'qr' && !(r.qr_payment || '').includes('Supported')) return false;
+        if (state.lineFilter === 'loaded' && !state.loadedRoutes[String(r.bus_line)]) return false;
+        if (!q) return true;
+        return String(r.bus_line).toLowerCase().includes(q) ||
+          (r.line_name || '').toLowerCase().includes(q) ||
+          (r.agency || '').toLowerCase().includes(q);
+      });
+
+      listEl.innerHTML = '';
+      if (filtered.length === 0) {
+        listEl.innerHTML = '<div class="text-xs text-slate-400 p-2">No YBS lines match your filter.</div>';
+        return;
+      }
+
+      filtered.slice(0, 150).forEach(r => {
+        const isLoaded = Boolean(state.loadedRoutes[String(r.bus_line)]);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'w-full text-left rounded-xl p-2.5 bg-slate-900/75 hover:bg-slate-800/90 border border-slate-800 hover:border-amber-400/40 transition flex items-center justify-between gap-2 cursor-pointer';
+        btn.innerHTML = `
+          <div class="flex items-center gap-2.5 min-w-0">
+            <span class="px-2 py-1 rounded-lg bus-badge text-xs shrink-0">YBS ${r.bus_line}</span>
+            <div class="min-w-0">
+              <div class="text-xs font-semibold text-white truncate">${r.line_name || 'Route ' + r.bus_line}</div>
+              <div class="text-[10px] text-slate-400 truncate">${r.agency || 'YBS'} · ${r.total_stops || '?'} stops ${(r.qr_payment || '').includes('Supported') ? '· QR Pay' : ''}</div>
+            </div>
+          </div>
+          <span class="text-[10px] px-1.5 py-0.5 rounded ${isLoaded ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-800 text-slate-400'} shrink-0">${isLoaded ? '3D Ready' : 'Load'}</span>
+        `;
+        btn.addEventListener('click', async () => {
+          sfxClick();
+          let rData = state.loadedRoutes[String(r.bus_line)];
+          if (!rData) {
+            showToast(`Loading YBS ${r.bus_line} 3D route...`);
+            rData = await fetchRouteDetail(r);
+            rebuildStopBeacons();
+            rebuildAllRoutesNetwork();
+            renderLinesList();
+          }
+          if (rData && rData.stops && rData.stops.length >= 2) {
+            const first = rData.stops[0];
+            const last = rData.stops[rData.stops.length - 1];
+            renderJourneyIn3D({
+              transfers: 0,
+              totalStops: rData.stops.length,
+              legs: [{
+                bus_line: String(r.bus_line),
+                from: { name_mm: first.stop_name_mm, name_en: first.stop_name_en },
+                to: { name_mm: last.stop_name_mm, name_en: last.stop_name_en },
+                stops: rData.stops
+              }]
+            });
+          } else {
+            showToast('Could not load stops for this route');
+          }
+        });
+        listEl.appendChild(btn);
+      });
+    }
+
+    function renderQuickDemos() {
+      const containerEl = document.getElementById('quick-demos');
+      const demos = [
+        { label: 'Sule → Hledan', a: 'Sule', b: 'Hledan' },
+        { label: 'Insein → Botataung (Transfer)', a: 'Insein', b: 'Botataung' },
+        { label: 'Hlaing Tharyar → Tamwe (Transfer)', a: 'Hlaing Tharyar', b: 'Tamwe' }
+      ];
+      containerEl.innerHTML = '';
+      demos.forEach(d => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'px-2.5 py-1 rounded-lg bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/30 text-[11px] font-semibold text-amber-300 cursor-pointer transition';
+        b.textContent = d.label;
+        b.addEventListener('click', () => {
+          sfxClick();
+          const m1 = searchStops(d.a);
+          const m2 = searchStops(d.b);
+          if (m1.length && m2.length) {
+            setOriginStop(m1[0]);
+            setDestStop(m2[0]);
+            runRouteSearch();
+          }
+        });
+        containerEl.appendChild(b);
+      });
+    }
+
+    let modalStop = null;
+    function openStopModal(stop) {
+      sfxClick();
+      modalStop = stop;
+      document.getElementById('modal-stop-mm').textContent = stop.name_mm || stop.name_en;
+      document.getElementById('modal-stop-en').textContent = stop.name_en;
+      document.getElementById('modal-stop-road').textContent = stop.road || `${stop.lat.toFixed(4)}, ${stop.lng.toFixed(4)}`;
+      const distEl = document.getElementById('modal-stop-dist');
+      if (state.gps.active && state.gps.lat !== null) {
+        distEl.textContent = `Distance from your GPS: ${formatDistance(haversineMeters(state.gps.lat, state.gps.lng, stop.lat, stop.lng))}`;
+      } else {
+        distEl.textContent = '';
+      }
+      document.getElementById('modal-stop-lines').innerHTML = Array.from(stop.lines).map(l => `<span class="px-2 py-0.5 rounded-lg bus-badge text-xs">YBS ${l}</span>`).join('');
+      document.getElementById('stop-modal').classList.remove('hidden');
+    }
+
+    function updateSimPlayIcon() {
+      const icon = document.getElementById('sim-play-icon');
+      icon.setAttribute('data-lucide', state.sim.playing ? 'pause' : 'play');
+      if (window.lucide) lucide.createIcons();
+    }
+
+    function updateChaseBtn() {
+      const btn = document.getElementById('sim-chase-btn');
+      if (state.sim.chaseCam) {
+        btn.classList.add('bg-emerald-500', 'text-slate-950');
+        btn.classList.remove('bg-emerald-500/20', 'text-emerald-300');
+      } else {
+        btn.classList.remove('bg-emerald-500', 'text-slate-950');
+        btn.classList.add('bg-emerald-500/20', 'text-emerald-300');
+      }
+    }
+
+    // =========================================================================
+    // 11. EVENT BINDINGS & INIT
+    // =========================================================================
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        sfxClick();
+        switchTab(btn.dataset.tab);
+      });
+    });
+
+    document.querySelectorAll('.line-filter-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        sfxClick();
+        state.lineFilter = btn.dataset.filter;
+        document.querySelectorAll('.line-filter-btn').forEach(b => {
+          b.classList.remove('bg-amber-400', 'text-slate-950');
+          b.classList.add('bg-slate-800', 'text-slate-300');
+        });
+        btn.classList.add('bg-amber-400', 'text-slate-950');
+        btn.classList.remove('bg-slate-800', 'text-slate-300');
+        renderLinesList();
+      });
+    });
+
+    // Zoom Buttons
+    document.getElementById('zoom-in-btn').addEventListener('click', () => { sfxClick(); zoomCamera(0.78); });
+    document.getElementById('zoom-out-btn').addEventListener('click', () => { sfxClick(); zoomCamera(1.28); });
+
+    // Live GPS Buttons
+    document.getElementById('gps-locate-btn').addEventListener('click', () => {
+      locateUserGPS(false);
+      switchTab('nearby');
+    });
+    document.getElementById('panel-gps-btn').addEventListener('click', () => locateUserGPS(false));
+    document.getElementById('demo-gps-btn').addEventListener('click', () => {
+      sfxClick();
+      updateGpsPosition(16.82665, 96.1307, 15, true, true);
+      showToast('Simulated Live GPS at Hledan Junction');
+    });
+    document.getElementById('use-gps-origin-btn').addEventListener('click', () => {
+      sfxClick();
+      if (!state.gps.active || state.gps.nearestStops.length === 0) {
+        locateUserGPS(false);
+        setTimeout(() => {
+          if (state.gps.nearestStops.length > 0) setOriginStop(state.gps.nearestStops[0].stop);
+        }, 600);
+      } else {
+        setOriginStop(state.gps.nearestStops[0].stop);
+        showToast(`Origin set to nearest stop: ${state.gps.nearestStops[0].stop.name_mm || state.gps.nearestStops[0].stop.name_en}`);
+      }
+    });
+
+    document.getElementById('line-search-input').addEventListener('input', renderLinesList);
+    document.getElementById('ai-query-btn').addEventListener('click', handleSmartAIQuery);
+    document.getElementById('ai-query-input').addEventListener('keydown', e => { if (e.key === 'Enter') handleSmartAIQuery(); });
+    document.getElementById('find-route-btn').addEventListener('click', runRouteSearch);
+    document.getElementById('clear-route-btn').addEventListener('click', () => {
+      sfxClick();
+      state.originKey = null;
+      state.destKey = null;
+      document.getElementById('origin-input').value = '';
+      document.getElementById('dest-input').value = '';
+      clear3DRoute();
+      rebuildStopBeacons();
+    });
+
+    document.getElementById('swap-stops-btn').addEventListener('click', () => {
+      sfxClick();
+      const tmp = state.originKey;
+      state.originKey = state.destKey;
+      state.destKey = tmp;
+      const oIn = document.getElementById('origin-input');
+      const dIn = document.getElementById('dest-input');
+      const tv = oIn.value; oIn.value = dIn.value; dIn.value = tv;
+      rebuildStopBeacons();
+    });
+
+    document.getElementById('toggle-panel-btn').addEventListener('click', () => {
+      sfxClick();
+      state.panelOpen = !state.panelOpen;
+      document.getElementById('side-panel').style.transform = state.panelOpen ? 'translateX(0)' : 'translateX(-115%)';
+    });
+
+    document.getElementById('toggle-network-btn').addEventListener('click', () => {
+      sfxClick();
+      state.networkVisible = !state.networkVisible;
+      allRoutesGroup.visible = state.networkVisible;
+      document.getElementById('toggle-network-btn').classList.toggle('text-amber-300', state.networkVisible);
+      document.getElementById('toggle-network-btn').classList.toggle('text-slate-400', !state.networkVisible);
+    });
+
+    document.getElementById('toggle-labels-btn').addEventListener('click', () => {
+      sfxClick();
+      state.labelsVisible = !state.labelsVisible;
+      labelsGroup.visible = state.labelsVisible;
+      document.getElementById('toggle-labels-btn').classList.toggle('text-amber-300', state.labelsVisible);
+      document.getElementById('toggle-labels-btn').classList.toggle('text-slate-400', !state.labelsVisible);
+    });
+
+    document.getElementById('sound-toggle-btn').addEventListener('click', () => {
+      state.soundEnabled = !state.soundEnabled;
+      document.getElementById('sound-icon').setAttribute('data-lucide', state.soundEnabled ? 'volume-2' : 'volume-x');
+      if (window.lucide) lucide.createIcons();
+      if (state.soundEnabled) sfxClick();
+    });
+
+    document.getElementById('help-btn').addEventListener('click', () => { sfxClick(); document.getElementById('help-modal').classList.remove('hidden'); });
+    document.getElementById('close-help-modal').addEventListener('click', () => document.getElementById('help-modal').classList.add('hidden'));
+    document.getElementById('close-stop-modal').addEventListener('click', () => document.getElementById('stop-modal').classList.add('hidden'));
+
+    function openDataModal() {
+      sfxClick();
+      updateDataModalStats();
+      document.getElementById('data-modal').classList.remove('hidden');
+    }
+    document.getElementById('open-data-modal-btn').addEventListener('click', openDataModal);
+    document.getElementById('mobile-data-btn').addEventListener('click', openDataModal);
+    document.getElementById('close-data-modal').addEventListener('click', () => document.getElementById('data-modal').classList.add('hidden'));
+    document.getElementById('retry-github-btn').addEventListener('click', () => { sfxClick(); syncFromGitHub(); });
+    document.getElementById('local-json-input').addEventListener('change', e => { handleLocalJsonImport(e.target.files); });
+
+    document.getElementById('modal-set-origin').addEventListener('click', () => {
+      if (modalStop) setOriginStop(modalStop);
+      document.getElementById('stop-modal').classList.add('hidden');
+    });
+    document.getElementById('modal-set-dest').addEventListener('click', () => {
+      if (modalStop) setDestStop(modalStop);
+      document.getElementById('stop-modal').classList.add('hidden');
+    });
+
+    document.querySelectorAll('.cam-btn').forEach(btn => {
+      btn.addEventListener('click', () => setCameraPreset(btn.dataset.cam));
+    });
+
+    document.getElementById('sim-play-btn').addEventListener('click', () => {
+      sfxClick();
+      state.sim.playing = !state.sim.playing;
+      updateSimPlayIcon();
+    });
+    document.getElementById('sim-speed-btn').addEventListener('click', () => {
+      sfxClick();
+      state.sim.speed = state.sim.speed === 1 ? 2 : (state.sim.speed === 2 ? 4 : 1);
+      document.getElementById('sim-speed-btn').textContent = `${state.sim.speed}x`;
+    });
+    document.getElementById('sim-chase-btn').addEventListener('click', () => {
+      sfxClick();
+      state.sim.chaseCam = !state.sim.chaseCam;
+      updateChaseBtn();
+    });
+
+    setupStopAutocomplete('origin-input', 'origin-dropdown', s => { state.originKey = s.key; rebuildStopBeacons(); flyCameraTo(s.x, s.z, 75); });
+    setupStopAutocomplete('dest-input', 'dest-dropdown', s => { state.destKey = s.key; rebuildStopBeacons(); flyCameraTo(s.x, s.z, 75); });
+
+    if (window.lucide) lucide.createIcons();
+    updateCameraTransform();
+    initData();
+    requestAnimationFrame(animate);
+  }
+
+  if (document.readyState === 'complete') {
+    startYbsAiApp().catch(err => {
+      const el = document.getElementById('sync-status-text');
+      if (el) el.textContent = '3D Engine Error: ' + (err && err.message ? err.message : 'Reload required');
+    });
+  } else {
+    window.addEventListener('load', () => {
+      startYbsAiApp().catch(err => {
+        const el = document.getElementById('sync-status-text');
+        if (el) el.textContent = '3D Engine Error: ' + (err && err.message ? err.message : 'Reload required');
+      });
+    });
+  }
+  </script>
+</body>
+</html>
